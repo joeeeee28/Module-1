@@ -1,10 +1,10 @@
 import express from 'express'
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { scryptSync, randomBytes, timingSafeEqual, createHmac } from 'node:crypto'
 import { db, migrate, now, addDays, getSetting, setSetting, userToday } from './db.js'
-import { config, logger, aiConfigured, searchConfigured } from './config.js'
+import { config, logger, aiConfigured, searchConfigured, VERSION } from './config.js'
 import { seedIfEmpty } from './seed.js'
 import {
   generateRoadmap,
@@ -28,7 +28,7 @@ import { recordMemory, getMemory, deriveMemory, memorySummary } from './ai/memor
 import { runMorningAgent } from './agent/morning.js'
 import { sendNotification, listNotifications, markRead, unreadCount } from './agent/notify.js'
 import { logAgentRun, listAgentRuns } from './agent/runlog.js'
-import { startScheduler } from './agent/scheduler.js'
+import { startScheduler, isSchedulerRunning } from './agent/scheduler.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -51,18 +51,45 @@ if (config.seedDemo) {
 const app = express()
 app.use(express.json({ limit: '2mb' }))
 
+// ---------------- health check ----------------
+app.get('/health', (req, res) => {
+  let database = 'ok'
+  let databaseError = null
+  try {
+    db.prepare('SELECT 1 AS ok').get()
+  } catch (e) {
+    database = 'error'
+    databaseError = e.message
+  }
+  const status = database === 'ok' ? 'ok' : 'degraded'
+  res.status(status === 'ok' ? 200 : 503).json({
+    status,
+    app: 'ok',
+    database,
+    databaseError,
+    ai: aiConfigured() ? 'model-configured' : 'deterministic-engine',
+    search: searchConfigured() ? 'configured' : 'unavailable',
+    scheduler: isSchedulerRunning() ? 'running' : 'stopped',
+    version: VERSION,
+    time: new Date().toISOString(),
+  })
+})
+
 // ---------------- auth helpers ----------------
 const tokens = getSetting('tokens', {})
+// When AUTH_SECRET is set, only a hash of each token is stored (defense in depth).
+const hashToken = (t) =>
+  config.authSecret ? createHmac('sha256', config.authSecret).update(t).digest('hex') : t
 function issueToken(userId) {
   const tok = randomBytes(24).toString('hex')
-  tokens[tok] = userId
+  tokens[hashToken(tok)] = userId
   setSetting('tokens', tokens)
   return tok
 }
 function userIdFrom(req) {
   const h = req.headers.authorization || ''
   const tok = h.replace(/^Bearer\s+/i, '')
-  return tokens[tok] || null
+  return tokens[hashToken(tok)] || null
 }
 function currentUser(req) {
   const uid = userIdFrom(req) || db.prepare('SELECT id FROM users ORDER BY id LIMIT 1').get()?.id
@@ -114,7 +141,7 @@ app.get('/api/config', (req, res) => {
     webhookConfigured: Boolean(config.webhookUrl),
     emailConfigured: Boolean(config.smtpHost && config.smtpFrom),
     seedDemo: config.seedDemo,
-    version: '2.0.0',
+    version: VERSION,
   })
 })
 
@@ -806,13 +833,23 @@ if (fs.existsSync(dist)) {
   app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')))
 }
 
-const PORT = process.env.PORT || 4000
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`LearnMate server running on http://0.0.0.0:${PORT}`)
-  startScheduler()
-  logger.info('server', `LearnMate listening on :${PORT}`, {
-    ai: aiConfigured() ? 'model-configured' : 'deterministic-engine',
-    search: searchConfigured(),
-    seedDemo: config.seedDemo,
+export function startServer(port = config.port) {
+  const server = app.listen(port, '0.0.0.0', () => {
+    console.log(`LearnMate server running on http://0.0.0.0:${port}`)
+    startScheduler()
+    logger.info('server', `LearnMate listening on :${port}`, {
+      ai: aiConfigured() ? 'model-configured' : 'deterministic-engine',
+      search: searchConfigured(),
+      seedDemo: config.seedDemo,
+    })
   })
-})
+  return server
+}
+
+export { app }
+
+// Start only when run directly (not when imported by tests or scripts).
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isMain) {
+  startServer()
+}

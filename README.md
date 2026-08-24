@@ -1,154 +1,273 @@
-# LearnMate — Personal AI Learning Management Agent
+# LearnMate — Personal AI Learning Agent
 
-A personal AI learning coach, mentor, planner, progress tracker, and accountability
-assistant. It turns your learning goals into structured roadmaps, generates an adaptive
-daily plan every morning, tracks completion, identifies gaps, and continuously adjusts
-your path based on **actual** performance.
-
-Built as a real working application (not a prototype) with persistent storage and a
-deterministic learning-agent engine that reasons over your real data.
+A self-hosted, persistent AI learning manager that runs **entirely on your Mac** —
+no cloud required. It turns your goals into roadmaps, generates an adaptive daily plan
+each morning, tracks sessions, runs assessments, computes real mastery, schedules
+spaced revision, and sends your morning briefing.
 
 ---
 
-## Quick start
+## Prerequisites
+
+| Tool | Required | Version | How to check |
+|---|---|---|---|
+| Git | Yes | any recent | `git --version` |
+| Node.js | Yes | **22 or newer** (built-in SQLite) | `node -v` |
+| npm | Yes | ships with Node | `npm -v` |
+| Python | No | — | not used |
+| PostgreSQL | No | — | SQLite is embedded |
+| Docker | Optional | — | only for the container option |
+
+No native compilation is required — the database (SQLite) and all dependencies are
+pure JavaScript or built into Node, so it works identically on **Apple Silicon** and
+**Intel** Macs.
+
+> If Node is missing or older than 22: `brew install node@22` (or download from nodejs.org).
+
+---
+
+## Installation
+
+### Option A — one-command auto-start service (recommended)
 
 ```bash
+git clone -b arena/01a0352f-module-1 https://github.com/joeeeee28/Module-1.git learnmate
+cd learnmate
+./scripts/install-mac.sh
+```
+
+This installs dependencies, builds the frontend, and registers LearnMate as a macOS
+`launchd` service that **auto-starts on login** and **restarts if it crashes**.
+
+### Option B — run manually
+
+```bash
+git clone -b arena/01a0352f-module-1 https://github.com/joeeeee28/Module-1.git learnmate
+cd learnmate
 npm install
-npm run build     # build the React frontend into dist/
-npm start         # serves the app + API on http://localhost:4000
+npm run build
+npm run start:local
 ```
 
-For development with hot reload:
+### Option C — Docker
 
 ```bash
-npm run dev       # Vite dev server (:5173) proxying the API (:4000)
+docker build -t learnmate .
+docker run -d --name learnmate --restart unless-stopped -p 4000:4000 -v learnmate_data:/app/data learnmate
 ```
-
-Create an account from the login screen — your data persists in SQLite.
-
-Optional: copy `.env.example` → `.env` to configure a real AI model, live search, and
-notification transports (Telegram / webhook / email).
-
-**Optional demo:** run with `SEED_DEMO=true` to create `alex@example.com` / `demo`.
 
 ---
 
-## What it does
+## Environment Variables
 
-- **Learning goals** → auto-generated **6-phase roadmap** (Foundation → Intermediate →
-  Advanced → Project → Assessment → Mastery). Editable at every level.
-- **Daily planner** that analyzes your goals, priorities, deadlines, previous completion,
-  missed tasks, weak areas, and available time — and never blindly advances a topic you
-  haven't understood.
-- **Morning briefing** — a concise, dynamic summary of what to learn today, why, how long,
-  what to practice/build, success criteria, yesterday, progress, and your streak.
-- **Adaptive learning engine** — scales difficulty up/down, inserts reinforcement for weak
-  areas, carries over unfinished work, and reschedules intelligently.
-- **Task completion + reflection** — record confidence (1–5), difficulty, actual time,
-  notes, and what you learned.
-- **Assessments** — quick quizzes, concept tests, practical / debugging / scenario
-  challenges. Scores feed directly into mastery.
-- **Skill mastery engine** — weighted across lessons, exercises, assessment scores,
-  projects, confidence, and recency.
-- **Spaced revision** — automatic 1 / 3 / 7 / 14 / 30-day reviews; weak topics come back
-  earlier.
-- **AI Coach** — context-aware chat that uses your real goals, roadmap, and history
-  (explain concepts, quiz you, suggest projects, review your week, etc.).
-- **Weekly & monthly reviews**, a learning **calendar**, **resources**, **markdown notes**
-  with AI actions (summarize, flashcards, quiz questions, gap detection, simplify).
-- **Premium dashboard** with KPIs, skill matrix, weekly progress, and upcoming items.
+Copy the template and edit as needed:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `PORT` | No | HTTP port (default `4000`) |
+| `DATABASE_PATH` | No | SQLite file path (default `./data/app.db`) |
+| `LOG_LEVEL` / `LOG_DIR` | No | Logging verbosity + output dir |
+| `AUTH_SECRET` | No | Optional stable token secret (sessions already persist without it) |
+| `SEED_DEMO` | No | `true` creates the demo account (off by default) |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | **Only for real AI model** | Server-side LLM (see below) |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | **Only for real AI model** | Alternative provider |
+| `SEARCH_API_KEY` / `SEARCH_API_PROVIDER` | **Only for live search** | `tavily` / `brave` / `serp` |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | **Only for Telegram** | External notification transport |
+| `WEBHOOK_URL` | **Only for webhook** | External notification transport |
+| `SMTP_HOST` … `SMTP_FROM` | **Only for email** | External notification transport |
+| `ADMIN_TOKEN` | **Only for cron** | Protects the cron endpoint |
+
+**Important:** `.env` is git-ignored. Keys are read server-side only and never reach
+the browser.
+
+### Do I need an AI key?
+
+No. LearnMate ships with a **deterministic learning engine** that works with zero keys —
+it genuinely computes plans, priorities, mastery, revision, reviews, and coach answers
+from your stored data. Setting `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) upgrades the
+AI Coach and open-ended answers to a real LLM with your full learning context. Without
+a key, nothing is faked — the UI labels every response with its source (`engine` vs `model`).
+
+---
+
+## Database Setup
+
+There is **no separate database to install**. SQLite runs inside the Node process.
+
+- The schema is created automatically on first start (`server/db.js` → `migrate()`).
+- Data lives in **one file**: `data/app.db` (path configurable via `DATABASE_PATH`).
+- It persists across restarts, logins, and reboots. **Back it up** by copying that file.
+
+Tables: users, skills, goals, roadmap_phases, topics, daily_plans, tasks, task_logs,
+sessions, assessments, resources, notes, reviews, revision_schedule, agent_runs,
+learning_memory, projects, notifications, settings.
+
+Seed data is **off by default**. To preview with a sample account, run with
+`SEED_DEMO=true` (clearly labelled demo data). The real app operates entirely from
+user-created data.
+
+---
+
+## Running the Application
+
+One command starts the frontend, backend, database, and scheduler (all in one process):
+
+```bash
+npm run start:local     # build + serve (production-style)
+```
+
+- Open **http://localhost:4000** and create your account.
+- Development mode (hot reload): `npm run dev` → http://localhost:5173
+
+### Running the AI Agent (scheduler)
+
+The scheduler runs **inside the server process**, so it starts automatically with the
+commands above. It wakes every 30 seconds and fires the morning agent at each user's
+configured briefing time in their own timezone.
+
+To run a dedicated agent process (same thing, explicit):
+
+```bash
+npm run agent
+```
+
+> The scheduler requires the server process to stay running. If you installed via
+> Option A (`launchd`), it runs continuously in the background.
+
+---
+
+## Testing the Morning Agent
+
+Trigger the full morning pipeline immediately (no waiting until morning):
+
+```bash
+npm run agent:morning                 # for the first user
+npm run agent:morning -- you@x.com    # for a specific user
+```
+
+This loads your profile, goals, roadmap, and history → calculates priorities →
+generates and persists today's plan → enriches it with a real resource → sends the
+notification. It prints the result and logs every step.
+
+There is also a **"Run morning agent now"** button on the *Agent Activity* screen.
+
+---
+
+## Running Tests
+
+```bash
+npm test
+```
+
+Uses Node's built-in test runner (no extra install). Covers authentication, database,
+goal + roadmap creation, daily plan generation, session tracking, adaptive task
+completion, assessment grading, mastery computation, empty-state (no mock data), and
+agent run history.
+
+---
+
+## Health Check
+
+```
+GET http://localhost:4000/health
+```
+
+Returns app/database/AI/search/scheduler status plus version and timestamp:
+
+```json
+{
+  "status": "ok",
+  "database": "ok",
+  "ai": "deterministic-engine",
+  "search": "unavailable",
+  "scheduler": "running",
+  "version": "2.1.0"
+}
+```
+
+---
+
+## Notifications
+
+- **In-app inbox** — always works; a bell in the top bar shows unread messages.
+- **External transports** (Telegram / webhook / email) activate when their env vars are
+  set, and each message records its real delivery status — nothing is marked "delivered"
+  unless the transport accepted it.
+- For local use without external channels, the in-app inbox is the **notification
+  preview** and is always real.
+
+---
+
+## Timezone
+
+Stored per-user (`user.timezone`, auto-detected at signup, editable in **Settings**).
+Used for daily plans, morning briefings, reminders, the calendar, deadlines, weekly
+reviews, and the scheduler trigger.
 
 ---
 
 ## Architecture
 
 ```
-React (Vite) + Express + SQLite (node:sqlite)
+React (Vite) frontend  ──HTTP──►  Express API  ──►  SQLite (node:sqlite)
+                                        │
+                        ┌───────────────┼──────────────────┐
+                   Learning Agent    AI Provider       Scheduler (in-process)
+                   (deterministic    (optional LLM)    fires morning agent
+                    engine)                            per-user timezone
 ```
 
-The "AI" has two layers:
-
-1. **Deterministic learning-agent engine** (`server/ai/engine.js`) — always available,
-   structured as logical agents (Planner, Coach, Assessor, Progress, Accountability,
-   Resource, Review) that genuinely compute decisions from stored data.
-2. **Optional real model** (`server/ai/provider.js`) — when `OPENAI_API_KEY` or
-   `ANTHROPIC_API_KEY` is set, the AI Coach and open-ended answers are generated by a real
-   LLM with the user's full learning context (server-side only). Without a key, the engine
-   takes over — never fake output.
-
-```
-server/
-  config.js       env config + structured logger (no secrets logged)
-  db.js           schema + migrations (SQLite, no native deps)
-  seed.js         OPTIONAL demo seed (SEED_DEMO=true)
-  index.js        Express API
-  ai/
-    catalog.js    curated skill catalog + generic roadmap generator
-    engine.js     roadmap / planner / adaptive / mastery / revision / reviews / coach
-    provider.js   pluggable LLM (OpenAI / Anthropic) with graceful fallback
-    discovery.js  real resource discovery (PyPI/npm + curated docs + optional search)
-    memory.js     persistent learning memory (derived from real activity)
-  agent/
-    morning.js    daily agent pipeline (profile→goals→progress→plan→notify)
-    scheduler.js  in-process cron (per-user timezone, catch-up safe)
-    notify.js     notification service (in-app + webhook/telegram/email)
-    runlog.js     agent run history (audit log)
-src/
-  App.jsx         auth + layout + navigation + notifications bell
-  pages/          14 screens (Dashboard, Today, Goals, Roadmap, Skills, Calendar,
-                  Resources, Notes, Assessments, Progress, Coach, Review,
-                  Agent Activity, Settings)
-  api.js          client
-  styles.css      design system
-```
+- **Frontend** — React 18 + Vite; 14 screens (Dashboard, Today, Goals, Roadmap, Skills,
+  Calendar, Resources, Notes, Assessments, Progress, Coach, Review, Agent Activity,
+  Settings).
+- **Backend** — Express REST API in `server/`.
+- **Database** — SQLite via Node's built-in `node:sqlite` (no native deps, no ORM —
+  plain prepared statements).
+- **AI** — two layers: the deterministic learning-agent engine (`server/ai/engine.js`,
+  always on) + an optional real LLM (`server/ai/provider.js`, OpenAI/Anthropic) with the
+  user's live context. Structured as Planner / Coach / Assessor / Progress /
+  Accountability / Resource / Review agents.
+- **Agent memory** — `server/ai/memory.js` derives persistent memory (strengths,
+  weaknesses, struggles, interests, projects) from real sessions and assessments.
+- **Scheduler** — `server/agent/scheduler.js` (in-process, catch-up safe) + a cron
+  endpoint `POST /api/agent/cron/morning` (ADMIN_TOKEN) for external schedulers.
+- **Notifications** — `server/agent/notify.js` (in-app always; webhook/Telegram/email
+  when configured), with an audit log in `agent_runs`.
 
 ### Honesty guarantees
 
-- No mock data by default — a fresh account shows **"No data available yet"**.
-  (`SEED_DEMO=true` is the only way to create the demo account.)
-- Every resource is labeled with its **source** (`pypi` / `npm` / `curated` / `search` /
-  `manual`) and **verification** status. Nothing is marked "verified" unless a real HTTP
-  check succeeded.
-- Notifications are marked **delivered** only when the transport accepted them; each
-  delivery attempt is recorded with per-channel status.
-- The **Agent Activity** screen shows a real audit log of every automated action.
-- AI Coach responses are labeled with their source (`engine` vs `model`).
-
-### The daily loop it supports
-
-Create user → create goal → generate roadmap → generate today's plan → complete task →
-record confidence → take assessment → update mastery → adapt roadmap → generate next day's
-plan → weekly review → morning briefing.
-
-All learning history is persisted, so the agent becomes more useful over time.
+- No mock data by default — a fresh account shows "No learning activity yet."
+  (`SEED_DEMO=true` is the only way to create demo data.)
+- Resources are labeled with their source (`pypi` / `npm` / `curated` / `search` /
+  `manual`) and verification status — never invented URLs.
+- Agent actions are recorded in a real audit log (Agent Activity screen).
 
 ---
 
-## Deploy
+## Troubleshooting
 
-Deployment configs are included for one-click/self-host:
+| Symptom | Fix |
+|---|---|
+| `node -v` < 22 | `brew install node@22` |
+| Port already in use | `PORT=4001 npm run start:local`, or stop the other process |
+| "No user found" from `agent:morning` | Create an account first, then re-run |
+| AI Coach looks basic | It's the built-in engine — set an `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` for a real LLM |
+| External notifications not sending | Set the matching env var (Telegram/webhook/SMTP); check Agent Activity for the recorded status |
+| Live resource discovery says "unavailable" | Normal if the network blocks it — it falls back to saved resources; set `SEARCH_API_KEY` for search |
+| Service stopped after reboot | Re-run `./scripts/install-mac.sh` (launchd) or use Docker `--restart unless-stopped` |
 
-- **Render.com** — push the repo and connect via *New → Blueprint* (`render.yaml` is
-  configured with a persistent disk for the SQLite data).
-- **Fly.io** — `fly launch --name learnmate --no-deploy && fly volumes create learnmate_data --size 1 && fly deploy`
-- **Docker** — `docker build -t learnmate . && docker run -p 4000:4000 -v learnmate_data:/app/data learnmate`
-- **Generic Node host** — `npm ci && npm run build && node server/index.js`
+---
 
-Set `PORT` to change the listen port (default `4000`). Keep the `data/` directory on a
-persistent volume so learning history survives redeploys.
-
-### Scheduling
-
-The **morning agent** runs on an in-process scheduler that honors each user's timezone and
-briefing time (catch-up safe). This requires the server process to stay running (fine on
-Render/Fly long-running services). For serverless/scale-to-zero hosts, trigger the same
-pipeline externally:
+## Manage the macOS service
 
 ```bash
-curl -X POST https://your-host/api/agent/cron/morning \
-  -H "x-admin-token: $ADMIN_TOKEN"
+launchctl list | grep learnmate      # check status
+launchctl stop com.learnmate         # stop
+launchctl start com.learnmate        # start
+tail -f data/learnmate.log           # view logs
+./scripts/uninstall-mac.sh           # remove the service (keeps data)
 ```
-
-Set `ADMIN_TOKEN` and schedule that curl from a cron provider. The same endpoint powers the
-in-app **"Run morning agent now"** button (Agent Activity screen).
-

@@ -76,3 +76,7 @@ export function stopScheduler() {
   if (timer) clearInterval(timer)
   timer = null
 }
+
+export function isSchedulerRunning() {
+  return Boolean(timer)
+}

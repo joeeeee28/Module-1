@@ -28,6 +28,14 @@ echo "==> LearnMate macOS installer"
 echo "    App directory : $APP_DIR"
 echo "    Port          : $PORT"
 
+# 0. Detect architecture (informational — all deps are pure JS / built-in,
+#    so there are no arch-specific native binaries to install).
+case "$(uname -m)" in
+  arm64)   echo "    Architecture  : Apple Silicon (arm64)" ;;
+  x86_64)  echo "    Architecture  : Intel (x86_64)" ;;
+  *)       echo "    Architecture  : $(uname -m)" ;;
+esac
+
 # 1. Check for Node.js (v22+ for built-in SQLite)
 if ! command -v node >/dev/null 2>&1; then
   echo "✗ Node.js not found. Install it first: https://nodejs.org (v22 or newer)"

@@ -4,10 +4,43 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+// Load a local `.env` file (repo root) if present. Real environment variables
+// always win — the file only fills in values that aren't already set.
+function loadEnvFile() {
+  const envPath = path.join(__dirname, '..', '.env')
+  if (!fs.existsSync(envPath)) return
+  let content
+  try {
+    content = fs.readFileSync(envPath, 'utf8')
+  } catch {
+    return
+  }
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq === -1) continue
+    const key = line.slice(0, eq).trim()
+    let val = line.slice(eq + 1).trim()
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1)
+    }
+    if (key && process.env[key] === undefined) process.env[key] = val
+  }
+}
+loadEnvFile()
+
+export const VERSION = '2.1.0'
+
 export const config = {
   port: process.env.PORT || 4000,
   nodeEnv: process.env.NODE_ENV || 'development',
   databasePath: process.env.DATABASE_PATH || path.join(__dirname, '..', 'data', 'app.db'),
+
+  // Optional secret used to derive session-token hashing. Tokens are also
+  // persisted, so sessions already survive restarts; this just adds a stable
+  // secret if you run multiple replicas.
+  authSecret: process.env.AUTH_SECRET || '',
 
   // demo seeding — OFF by default. Set SEED_DEMO=true to create a sample account.
   seedDemo: process.env.SEED_DEMO === 'true',

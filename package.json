@@ -8,7 +8,11 @@
     "dev:server": "node --watch server/index.js",
     "dev:client": "vite",
     "build": "vite build",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "start:local": "npm run build && node server/index.js",
+    "agent": "node server/index.js",
+    "agent:morning": "node scripts/morning.js",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.19.2",
