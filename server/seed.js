@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto'
+import { scryptSync } from 'node:crypto'
 import { db, now, addDays } from './db.js'
 import { generateRoadmap, generateDailyPlan, recomputeAllProgress } from './ai/engine.js'
 
-const hash = (s) => createHash('sha256').update(s).digest('hex')
+const SALT = 'learnmate-demo-salt'
+const hash = (s) => scryptSync(String(s), SALT, 64).toString('hex')
 
 export function seedIfEmpty() {
   const users = db.prepare('SELECT COUNT(*) c FROM users').get().c
@@ -11,13 +12,14 @@ export function seedIfEmpty() {
   // ---- user ----
   const u = db
     .prepare(
-      `INSERT INTO users (name, email, password_hash, role, career_goal, target_role, experience_level, daily_learning_minutes, preferred_days, briefing_time, learning_style)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO users (name, email, password_hash, password_salt, role, career_goal, target_role, experience_level, daily_learning_minutes, preferred_days, briefing_time, timezone, learning_style)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       'Alex Morgan',
       'alex@example.com',
       hash('demo'),
+      SALT,
       'IT Support Specialist',
       'Transition into a Solutions Architect / Automation Engineer role',
       'Solutions Architect',
@@ -25,6 +27,7 @@ export function seedIfEmpty() {
       45,
       JSON.stringify(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']),
       '07:30',
+      'UTC',
       'Hands-on / project-based'
     )
   const userId = Number(u.lastInsertRowid)

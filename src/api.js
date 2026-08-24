@@ -30,8 +30,9 @@ export const api = {
 
   // auth
   login: (email, password) => api.post('/api/auth/login', { email, password }),
-  signup: (name, email, password) => api.post('/api/auth/signup', { name, email, password }),
+  signup: (name, email, password, timezone) => api.post('/api/auth/signup', { name, email, password, timezone }),
   me: () => api.get('/api/auth/me'),
+  config: () => api.get('/api/config'),
 
   // data
   user: () => api.get('/api/user'),
@@ -79,5 +80,29 @@ export const api = {
   calendar: (month) => api.get(`/api/calendar?month=${month}`),
   dashboard: () => api.get('/api/dashboard'),
   settings: () => api.get('/api/settings'),
-  saveSettings: (notifications) => api.put('/api/settings', { notifications }),
+  saveSettings: (payload) => api.put('/api/settings', payload),
+
+  // sessions (real time tracker)
+  startSession: (b) => api.post('/api/sessions/start', b),
+  activeSession: () => api.get('/api/sessions/active'),
+  endSession: (id, b) => api.post(`/api/sessions/${id}/end`, b),
+
+  // notifications
+  notifications: () => api.get('/api/notifications'),
+  unreadCount: () => api.get('/api/notifications/unread'),
+  readNotification: (id) => api.post(`/api/notifications/${id}/read`),
+  readAllNotifications: () => api.post('/api/notifications/read-all'),
+
+  // agent
+  agentActivity: () => api.get('/api/agent/activity'),
+  runMorning: () => api.post('/api/agent/run-morning'),
+
+  // discovery + memory + projects
+  discoverResources: (topic, goal_id) => api.post('/api/resources/discover', { topic, goal_id }),
+  importResources: (goal_id, topic, items) => api.post('/api/resources/import', { goal_id, topic, items }),
+  memory: () => api.get('/api/memory'),
+  addMemory: (category, content) => api.post('/api/memory', { category, content }),
+  projects: () => api.get('/api/projects'),
+  createProject: (b) => api.post('/api/projects', b),
+  saveProject: (id, b) => api.put(`/api/projects/${id}`, b),
 }

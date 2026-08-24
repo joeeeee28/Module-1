@@ -2,8 +2,9 @@ import express from 'express'
 import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { createHash, randomBytes } from 'node:crypto'
-import { db, migrate, now, addDays, getSetting, setSetting } from './db.js'
+import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
+import { db, migrate, now, addDays, getSetting, setSetting, userToday } from './db.js'
+import { config, logger, aiConfigured, searchConfigured } from './config.js'
 import { seedIfEmpty } from './seed.js'
 import {
   generateRoadmap,
@@ -11,19 +12,41 @@ import {
   completeTask,
   recomputeAllProgress,
   computeSkillMastery,
+  computeSkillMasteryDetail,
   computeGoalProgress,
   generateAssessment,
   gradeAssessment,
   generateReview,
   coach,
   getGoalWithTopics,
+  computePriorityScores,
+  ensureSkillForGoal,
 } from './ai/engine.js'
+import { aiComplete } from './ai/provider.js'
+import { discoverResources, getCurrentInfo } from './ai/discovery.js'
+import { recordMemory, getMemory, deriveMemory, memorySummary } from './ai/memory.js'
+import { runMorningAgent } from './agent/morning.js'
+import { sendNotification, listNotifications, markRead, unreadCount } from './agent/notify.js'
+import { logAgentRun, listAgentRuns } from './agent/runlog.js'
+import { startScheduler } from './agent/scheduler.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const hash = (s) => createHash('sha256').update(String(s)).digest('hex')
+
+// scrypt password hashing (per-user salt)
+const hashPassword = (pw, salt) => scryptSync(String(pw), salt, 64).toString('hex')
+const verifyPassword = (pw, salt, expected) => {
+  if (!salt || !expected) return false
+  const actual = hashPassword(pw, salt)
+  const a = Buffer.from(actual, 'hex')
+  const b = Buffer.from(expected, 'hex')
+  return a.length === b.length && timingSafeEqual(a, b)
+}
 
 migrate()
-seedIfEmpty()
+if (config.seedDemo) {
+  seedIfEmpty()
+  logger.info('seed', 'Demo seed enabled — creating sample account')
+}
 
 const app = express()
 app.use(express.json({ limit: '2mb' }))
@@ -51,32 +74,48 @@ app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body || {}
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email)
   if (!user) return res.status(401).json({ error: 'No account found for that email.' })
-  if (user.password_hash && user.password_hash !== hash(password || ''))
+  if (user.password_hash && !verifyPassword(password || '', user.password_salt, user.password_hash))
     return res.status(401).json({ error: 'Incorrect password.' })
   const token = issueToken(user.id)
-  const { password_hash, ...safe } = user
+  const { password_hash, password_salt, ...safe } = user
   res.json({ token, user: safe })
 })
 
 app.post('/api/auth/signup', (req, res) => {
-  const { name, email, password } = req.body || {}
+  const { name, email, password, timezone } = req.body || {}
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required.' })
+  if (!password || String(password).length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters.' })
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email)
   if (existing) return res.status(409).json({ error: 'An account with that email already exists.' })
+  const salt = randomBytes(16).toString('hex')
   const ins = db
-    .prepare('INSERT INTO users (name, email, password_hash) VALUES (?,?,?)')
-    .run(name, email, hash(password || ''))
+    .prepare('INSERT INTO users (name, email, password_hash, password_salt, timezone) VALUES (?,?,?,?,?)')
+    .run(name, email, hashPassword(password, salt), salt, timezone || 'UTC')
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(ins.lastInsertRowid))
   const token = issueToken(user.id)
-  const { password_hash, ...safe } = user
+  const { password_hash, password_salt, ...safe } = user
+  logAgentRun(user.id, 'Auth Agent', 'Account created', `email=${email}`)
   res.json({ token, user: safe })
 })
 
 app.get('/api/auth/me', (req, res) => {
   const u = currentUser(req)
   if (!u) return res.status(401).json({ error: 'Not authenticated' })
-  const { password_hash, ...safe } = u
+  const { password_hash, password_salt, ...safe } = u
   res.json({ user: safe })
+})
+
+// Non-secret runtime capabilities — lets the UI label AI/data sources honestly.
+app.get('/api/config', (req, res) => {
+  res.json({
+    aiConfigured: aiConfigured(),
+    searchConfigured: searchConfigured(),
+    telegramConfigured: Boolean(config.telegramBotToken && config.telegramChatId),
+    webhookConfigured: Boolean(config.webhookUrl),
+    emailConfigured: Boolean(config.smtpHost && config.smtpFrom),
+    seedDemo: config.seedDemo,
+    version: '2.0.0',
+  })
 })
 
 // ---------------- profile ----------------
@@ -91,7 +130,7 @@ app.put('/api/user', (req, res) => {
   const u = currentUser(req)
   if (!u) return res.status(404).json({ error: 'No user' })
   const b = req.body || {}
-  const fields = ['name', 'role', 'career_goal', 'target_role', 'experience_level', 'daily_learning_minutes', 'preferred_days', 'briefing_time', 'learning_style', 'bio']
+  const fields = ['name', 'role', 'career_goal', 'target_role', 'experience_level', 'daily_learning_minutes', 'preferred_days', 'briefing_time', 'learning_style', 'bio', 'timezone', 'notification_channel']
   const sets = []
   const vals = []
   for (const f of fields) {
@@ -105,7 +144,7 @@ app.put('/api/user', (req, res) => {
     db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
   }
   const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(u.id)
-  const { password_hash, ...safe } = updated
+  const { password_hash, password_salt, ...safe } = updated
   res.json(safe)
 })
 
@@ -113,7 +152,7 @@ app.put('/api/user', (req, res) => {
 app.get('/api/skills', (req, res) => {
   const uid = currentUser(req)?.id
   const skills = db.prepare('SELECT * FROM skills WHERE user_id = ? ORDER BY category, name').all(uid)
-  res.json(skills)
+  res.json(skills.map((s) => ({ ...s, breakdown: computeSkillMasteryDetail(s) })))
 })
 app.post('/api/skills', (req, res) => {
   const uid = currentUser(req)?.id
@@ -171,7 +210,10 @@ app.post('/api/goals', (req, res) => {
       b.related_goal || null
     )
   const id = Number(ins.lastInsertRowid)
+  const goal = db.prepare('SELECT * FROM goals WHERE id = ?').get(id)
   generateRoadmap(id)
+  ensureSkillForGoal(goal)
+  recomputeAllProgress(uid)
   res.json(db.prepare('SELECT * FROM goals WHERE id = ?').get(id))
 })
 app.get('/api/goals/:id', (req, res) => {
@@ -221,7 +263,8 @@ app.put('/api/topics/:id', (req, res) => {
 // ---------------- daily plan + tasks ----------------
 app.get('/api/plan/today', (req, res) => {
   const uid = currentUser(req)?.id
-  const date = req.query.date || now()
+  const u = currentUser(req)
+  const date = req.query.date || userToday(u)
   let plan = db.prepare('SELECT * FROM daily_plans WHERE date = ? AND user_id = ? ORDER BY id DESC LIMIT 1').get(date, uid)
   if (!plan) {
     const u = currentUser(req)
@@ -231,15 +274,18 @@ app.get('/api/plan/today', (req, res) => {
   res.json({ plan, tasks, briefing: JSON.parse(plan.briefing_json || '{}') })
 })
 app.post('/api/plan/generate', (req, res) => {
-  const date = req.body?.date || now()
   const u = currentUser(req)
+  const date = req.body?.date || userToday(u)
   const { plan, briefing } = generateDailyPlan(u, date)
   const tasks = db.prepare('SELECT * FROM tasks WHERE daily_plan_id = ? ORDER BY sort').all(plan.id)
+  logAgentRun(u.id, 'Planner Agent', 'Generated daily plan (manual)', `planId=${plan.id} topic=${briefing.topic}`)
   res.json({ plan, tasks, briefing })
 })
 app.post('/api/tasks/:id/complete', (req, res) => {
+  const uid = currentUser(req)?.id
   try {
     completeTask(req.params.id, req.body || {})
+    deriveMemory(uid)
     res.json({ ok: true })
   } catch (e) {
     res.status(400).json({ error: e.message })
@@ -293,6 +339,41 @@ app.post('/api/sessions', (req, res) => {
   res.json(db.prepare('SELECT * FROM sessions WHERE id = ?').get(Number(ins.lastInsertRowid)))
 })
 
+// Real session tracker: START → (time passes) → END with reflection.
+app.post('/api/sessions/start', (req, res) => {
+  const uid = currentUser(req)?.id
+  const { goal_id, topic_id, topic_name } = req.body || {}
+  const nowIso = new Date().toISOString()
+  const ins = db
+    .prepare(
+      `INSERT INTO sessions (user_id, date, goal_id, topic_id, topic_name, status, kind, started_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    )
+    .run(uid, userToday(currentUser(req)), goal_id || null, topic_id || null, topic_name || null, 'in_progress', 'learn', nowIso)
+  logAgentRun(uid, 'Session Agent', 'Started learning session', `sessionId=${ins.lastInsertRowid}`)
+  res.json(db.prepare('SELECT * FROM sessions WHERE id = ?').get(Number(ins.lastInsertRowid)))
+})
+app.get('/api/sessions/active', (req, res) => {
+  const uid = currentUser(req)?.id
+  const active = db.prepare(`SELECT * FROM sessions WHERE user_id = ? AND status='in_progress' ORDER BY id DESC LIMIT 1`).get(uid)
+  res.json(active || null)
+})
+app.post('/api/sessions/:id/end', (req, res) => {
+  const uid = currentUser(req)?.id
+  const b = req.body || {}
+  const s = db.prepare('SELECT * FROM sessions WHERE id = ? AND user_id = ?').get(req.params.id, uid)
+  if (!s) return res.status(404).json({ error: 'Session not found' })
+  const endedAt = new Date().toISOString()
+  const duration = s.started_at ? Math.max(1, Math.round((new Date(endedAt) - new Date(s.started_at)) / 60000)) : (b.duration || 0)
+  db.prepare(
+    `UPDATE sessions SET status='completed', ended_at=?, duration=?, confidence=?, difficulty=?, notes=?, learned=?, understood=?, difficult_part=?, need_help=? WHERE id=?`
+  ).run(endedAt, duration, b.confidence ?? null, b.difficulty ?? null, b.notes ?? null, b.learned ?? null, b.understood ?? null, b.difficult ?? null, b.need_help ?? null, s.id)
+  recomputeAllProgress(uid)
+  deriveMemory(uid)
+  logAgentRun(uid, 'Session Agent', 'Ended learning session', `sessionId=${s.id} duration=${duration}m`)
+  res.json(db.prepare('SELECT * FROM sessions WHERE id = ?').get(s.id))
+})
+
 // ---------------- resources ----------------
 app.get('/api/resources', (req, res) => {
   const uid = currentUser(req)?.id
@@ -313,6 +394,36 @@ app.delete('/api/resources/:id', (req, res) => {
   db.prepare('DELETE FROM resources WHERE id = ? AND user_id = ?').run(req.params.id, uid)
   res.json({ ok: true })
 })
+// Live resource discovery — real lookups with honest source/verification labels.
+app.post('/api/resources/discover', async (req, res) => {
+  const uid = currentUser(req)?.id
+  const { topic, goal_id } = req.body || {}
+  if (!topic) return res.status(400).json({ error: 'Topic required' })
+  try {
+    const results = await discoverResources(topic, { limit: 8 })
+    logAgentRun(uid, 'Resource Agent', 'Discovered resources', `${topic}: ${results.length} results`, results.length ? 'SUCCESS' : 'EMPTY')
+    res.json({ topic, results, liveAvailable: results.some((r) => r.verified) })
+  } catch (e) {
+    logger.error('resources', 'Discovery failed', { error: e.message })
+    logAgentRun(uid, 'Resource Agent', 'Discovery failed', e.message, 'FAILED')
+    res.json({ topic, results: [], liveAvailable: false, message: 'Live resource discovery is temporarily unavailable. Using your saved resources instead.' })
+  }
+})
+app.post('/api/resources/import', (req, res) => {
+  const uid = currentUser(req)?.id
+  const { goal_id, topic, items } = req.body || {}
+  if (!Array.isArray(items)) return res.status(400).json({ error: 'items array required' })
+  const ins = db.prepare(
+    `INSERT INTO resources (user_id, goal_id, topic_id, title, url, type, source, topic, verified, last_verified)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  )
+  const saved = []
+  for (const it of items) {
+    const r = ins.run(uid, goal_id || null, it.topic_id || null, it.title, it.url, it.type || 'Web', it.source || 'discovered', topic || null, it.verified ? 1 : 0, it.lastVerified || null)
+    saved.push(db.prepare('SELECT * FROM resources WHERE id = ?').get(Number(r.lastInsertRowid)))
+  }
+  res.json(saved)
+})
 
 // ---------------- notes ----------------
 app.get('/api/notes', (req, res) => {
@@ -330,7 +441,7 @@ app.put('/api/notes/:topicId', (req, res) => {
   const { content, goal_id } = req.body || {}
   const existing = db.prepare('SELECT id FROM notes WHERE topic_id = ? AND user_id = ?').get(req.params.topicId, uid)
   if (existing) {
-    db.prepare('UPDATE notes SET content = ?, updated_at = datetime("now") WHERE topic_id = ? AND user_id = ?').run(content || '', req.params.topicId, uid)
+    db.prepare("UPDATE notes SET content = ?, updated_at = datetime('now') WHERE topic_id = ? AND user_id = ?").run(content || '', req.params.topicId, uid)
   } else {
     db.prepare('INSERT INTO notes (user_id, goal_id, topic_id, content) VALUES (?,?,?,?)').run(uid, goal_id || null, req.params.topicId, content || '')
   }
@@ -409,16 +520,53 @@ app.post('/api/reviews/generate', (req, res) => {
 })
 
 // ---------------- coach ----------------
-app.post('/api/coach', (req, res) => {
+app.post('/api/coach', async (req, res) => {
   const uid = currentUser(req)?.id
   const { message } = req.body || {}
-  res.json(coach(message, uid))
+  if (!message) return res.status(400).json({ error: 'Message required' })
+
+  // 1. deterministic engine always runs first — it owns the user's data and
+  //    produces honest, context-aware answers (quiz generation, next-step, …)
+  const engineReply = coach(message, uid)
+
+  // 2. If a real model is configured, ask it with full context and use its
+  //    answer for open-ended questions (explain, advise, motivate, …)
+  if (aiConfigured() && isOpenEnded(message)) {
+    const ctx = coachContextFor(uid)
+    const system =
+      'You are a personal learning coach. Use ONLY the provided user context. ' +
+      'Be concise and practical. If the context lacks data, say so. Never invent ' +
+      'the user\'s progress. Mark recommendations as recommendations, not facts.'
+    const text = await aiComplete(system, `User context:\n${ctx}\n\nUser question: ${message}`)
+    if (text) {
+      logAgentRun(uid, 'Coach Agent', 'Answered via AI model', message.slice(0, 80))
+      return res.json({ role: 'ai', text, type: 'text', source: 'model', context: engineReply.context })
+    }
+  }
+
+  logAgentRun(uid, 'Coach Agent', 'Answered via engine', message.slice(0, 80))
+  res.json({ ...engineReply, source: 'engine' })
 })
+
+function isOpenEnded(msg) {
+  const m = (msg || '').toLowerCase()
+  return !/quiz|test me/.test(m)
+}
+
+function coachContextFor(uid) {
+  const goals = db.prepare(`SELECT name, status, progress, deadline FROM goals WHERE user_id = ?`).all(uid)
+  const skills = db.prepare(`SELECT name, current_mastery, current_level FROM skills WHERE user_id = ?`).all(uid)
+  const recent = db.prepare(`SELECT date, topic_name, confidence, difficulty FROM sessions WHERE user_id = ? ORDER BY date DESC, id DESC LIMIT 10`).all(uid)
+  const assessments = db.prepare(`SELECT title, score, max_score FROM assessments WHERE user_id = ? AND completed=1 ORDER BY date DESC LIMIT 5`).all(uid)
+  const mem = memorySummary(uid)
+  return JSON.stringify({ goals, skills, recentSessions: recent, assessments, memory: mem }, null, 2)
+}
 
 // ---------------- briefing ----------------
 app.get('/api/briefing', (req, res) => {
   const uid = currentUser(req)?.id
-  const date = now()
+  const u = currentUser(req)
+  const date = userToday(u)
   let plan = db.prepare('SELECT * FROM daily_plans WHERE date = ? AND user_id = ? ORDER BY id DESC LIMIT 1').get(date, uid)
   if (!plan) {
     const u = currentUser(req)
@@ -451,7 +599,7 @@ app.get('/api/calendar', (req, res) => {
 app.get('/api/dashboard', (req, res) => {
   const u = currentUser(req)
   const uid = u.id
-  const date = now()
+  const date = userToday(u)
 
   let plan = db.prepare('SELECT * FROM daily_plans WHERE date = ? AND user_id = ? ORDER BY id DESC LIMIT 1').get(date, uid)
   if (!plan) plan = generateDailyPlan(u, date).plan
@@ -531,11 +679,124 @@ app.get('/api/settings', (req, res) => {
     weeklyReview: true,
   })
   const u = currentUser(req)
-  res.json({ notifications: notif, briefingTime: u?.briefing_time || '07:30' })
+  res.json({ notifications: notif, briefingTime: u?.briefing_time || '07:30', timezone: u?.timezone || 'UTC', channel: u?.notification_channel || 'in-app' })
 })
 app.put('/api/settings', (req, res) => {
+  const u = currentUser(req)
   if (req.body?.notifications) setSetting('notifications', req.body.notifications)
+  if (req.body?.timezone || req.body?.channel) {
+    const sets = []
+    const vals = []
+    if (req.body.timezone) { sets.push('timezone = ?'); vals.push(req.body.timezone) }
+    if (req.body.channel) { sets.push('notification_channel = ?'); vals.push(req.body.channel) }
+    vals.push(u.id)
+    db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+  }
   res.json({ ok: true })
+})
+
+// In-app notification inbox + read state.
+app.get('/api/notifications', (req, res) => {
+  const uid = currentUser(req)?.id
+  res.json(listNotifications(uid))
+})
+app.get('/api/notifications/unread', (req, res) => {
+  const uid = currentUser(req)?.id
+  res.json({ count: unreadCount(uid) })
+})
+app.post('/api/notifications/:id/read', (req, res) => {
+  const uid = currentUser(req)?.id
+  markRead(uid, req.params.id)
+  res.json({ ok: true })
+})
+app.post('/api/notifications/read-all', (req, res) => {
+  const uid = currentUser(req)?.id
+  db.prepare('UPDATE notifications SET read = 1 WHERE user_id = ?').run(uid)
+  res.json({ ok: true })
+})
+
+// ---------------- agent (automation) ----------------
+app.get('/api/agent/activity', (req, res) => {
+  const uid = currentUser(req)?.id
+  const limit = Number(req.query.limit || 100)
+  res.json(listAgentRuns(uid, limit))
+})
+// Manual morning-agent run (for the current user).
+app.post('/api/agent/run-morning', async (req, res) => {
+  const uid = currentUser(req)?.id
+  try {
+    const result = await runMorningAgent(uid, { notify: true })
+    res.json({ ok: true, skipped: result.skipped || false, briefing: result.briefing })
+  } catch (e) {
+    logger.error('agent', 'run-morning failed', { error: e.message, stack: e.stack })
+    res.status(500).json({ error: e.message })
+  }
+})
+// Cron-triggered morning runs for ALL users (protected by ADMIN_TOKEN).
+app.post('/api/agent/cron/morning', async (req, res) => {
+  const auth = req.headers['x-admin-token'] || req.query.token
+  if (!config.adminToken || auth !== config.adminToken) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  const users = db.prepare('SELECT * FROM users').all()
+  const results = []
+  for (const u of users) {
+    try {
+      const r = await runMorningAgent(u.id, { notify: true })
+      results.push({ userId: u.id, skipped: r.skipped || false, topic: r.briefing.topic })
+    } catch (e) {
+      results.push({ userId: u.id, error: e.message })
+    }
+  }
+  res.json({ ran: users.length, results })
+})
+
+// ---------------- learning memory ----------------
+app.get('/api/memory', (req, res) => {
+  const uid = currentUser(req)?.id
+  const mem = getMemory(uid)
+  res.json({ entries: mem, summary: memorySummary(uid) })
+})
+app.post('/api/memory', (req, res) => {
+  const uid = currentUser(req)?.id
+  const { category, content } = req.body || {}
+  if (!category || !content) return res.status(400).json({ error: 'category and content required' })
+  recordMemory(uid, category, content, 'user')
+  res.json({ ok: true })
+})
+
+// ---------------- projects ----------------
+app.get('/api/projects', (req, res) => {
+  const uid = currentUser(req)?.id
+  const projects = db.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY id DESC').all(uid)
+  res.json(projects.map((p) => ({ ...p, requirements: JSON.parse(p.requirements_json || '[]'), technologies: JSON.parse(p.technologies_json || '[]'), milestones: JSON.parse(p.milestones_json || '[]') })))
+})
+app.post('/api/projects', (req, res) => {
+  const uid = currentUser(req)?.id
+  const b = req.body || {}
+  if (!b.name) return res.status(400).json({ error: 'Project name required' })
+  const ins = db
+    .prepare(
+      `INSERT INTO projects (user_id, goal_id, name, objective, requirements_json, technologies_json, milestones_json)
+       VALUES (?,?,?,?,?,?,?)`
+    )
+    .run(uid, b.goal_id || null, b.name, b.objective || '', JSON.stringify(b.requirements || []), JSON.stringify(b.technologies || []), JSON.stringify(b.milestones || []))
+  logAgentRun(uid, 'Project Agent', 'Created project', b.name)
+  res.json(db.prepare('SELECT * FROM projects WHERE id = ?').get(Number(ins.lastInsertRowid)))
+})
+app.put('/api/projects/:id', (req, res) => {
+  const uid = currentUser(req)?.id
+  const b = req.body || {}
+  const fields = ['name', 'objective', 'status', 'evaluation']
+  const sets = []
+  const vals = []
+  for (const f of fields) if (f in b) { sets.push(`${f} = ?`); vals.push(b[f]) }
+  if ('requirements' in b) { sets.push('requirements_json = ?'); vals.push(JSON.stringify(b.requirements)) }
+  if ('technologies' in b) { sets.push('technologies_json = ?'); vals.push(JSON.stringify(b.technologies)) }
+  if ('milestones' in b) { sets.push('milestones_json = ?'); vals.push(JSON.stringify(b.milestones)) }
+  if (b.status === 'completed') { sets.push('completed_at = ?'); vals.push(new Date().toISOString()) }
+  if (sets.length) { vals.push(req.params.id); db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).run(...vals, uid) }
+  res.json(db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id))
 })
 
 // ---------------- static frontend ----------------
@@ -548,4 +809,10 @@ if (fs.existsSync(dist)) {
 const PORT = process.env.PORT || 4000
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`LearnMate server running on http://0.0.0.0:${PORT}`)
+  startScheduler()
+  logger.info('server', `LearnMate listening on :${PORT}`, {
+    ai: aiConfigured() ? 'model-configured' : 'deterministic-engine',
+    search: searchConfigured(),
+    seedDemo: config.seedDemo,
+  })
 })

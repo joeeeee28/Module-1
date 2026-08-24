@@ -3,7 +3,7 @@
 // genuinely analyzes stored goals, roadmaps, sessions and assessments to make
 // decisions (planning, adaptation, mastery, revision, reviews, coaching).
 
-import { db, now, addDays, daysBetween, getSetting, setSetting } from '../db.js'
+import { db, now, addDays, daysBetween, getSetting, setSetting, userToday } from '../db.js'
 import { CATALOG, genericTopics } from './catalog.js'
 
 const DIFF_ORDER = ['beginner', 'intermediate', 'advanced', 'expert']
@@ -228,6 +228,77 @@ export function generateRoadmap(goalId) {
 }
 
 // ---------------------------------------------------------------------------
+// Priority decision engine — a transparent, explainable score used to choose
+// what to learn next.
+//   Priority = goal priority weight + deadline urgency + skill gap +
+//              weakness + revision need + career relevance
+// ---------------------------------------------------------------------------
+const PRIORITY_WEIGHT = { High: 40, Medium: 25, Low: 10 }
+
+export function computePriorityScores(user, date = userToday(user)) {
+  const goals = db.prepare(`SELECT * FROM goals WHERE status = 'active' AND user_id = ?`).all(user.id)
+  const scores = goals.map((goal) => {
+    const factors = {}
+    factors.priority = PRIORITY_WEIGHT[goal.priority] || 25
+
+    const deadlineDays = goal.deadline ? daysBetween(date, goal.deadline) : null
+    factors.deadline = deadlineDays == null ? 10 : deadlineDays <= 0 ? 50 : Math.max(0, Math.round(50 - deadlineDays * 2))
+    if (deadlineDays != null && deadlineDays <= 3) factors.deadline = 60
+
+    factors.gap = Math.round(((goal.progress || 0) >= 100 ? 0 : 100 - goal.progress) * 0.3)
+
+    const weakTopics = db
+      .prepare(`SELECT COUNT(*) c FROM topics WHERE goal_id = ? AND (status='needs_review' OR status='in_progress')`)
+      .get(goal.id).c
+    factors.weakness = weakTopics * 12
+
+    const revDue = db
+      .prepare(`SELECT COUNT(*) c FROM revision_schedule WHERE goal_id = ? AND status='pending' AND due_date <= ?`)
+      .get(goal.id, date).c
+    factors.revision = revDue * 10
+
+    factors.relevance = goal.related_goal ? 15 : 5
+
+    const score = Math.round(Object.values(factors).reduce((a, b) => a + b, 0))
+    return { goal, score, factors }
+  })
+  return scores.sort((a, b) => b.score - a.score)
+}
+
+// Map a goal's name to a canonical skill, creating the skill row if needed so
+// the mastery engine has a real target to update. Returns the skill (or null).
+const SKILL_CATEGORY = {
+  Python: 'Technical', SQL: 'Technical', JavaScript: 'Technical', 'REST APIs': 'Technical',
+  'Git/GitHub': 'Technical', AI: 'Technical', 'AI Agents': 'Technical', Automation: 'Technical',
+  Azure: 'Microsoft / Cloud', PowerShell: 'Microsoft / Cloud', ServiceNow: 'ServiceNow',
+  'Business Analysis': 'Business / Architecture', 'Project Management': 'Business / Architecture',
+  'Solution Architecture': 'Business / Architecture',
+}
+
+export function ensureSkillForGoal(goal) {
+  const key = findCatalogKey(goal.name)
+  const skillName = key || goal.name.replace(/^(become|learn|master|proficient in|study)\s+/i, '').slice(0, 60)
+  let skill = db
+    .prepare('SELECT * FROM skills WHERE user_id = ? AND lower(name) = lower(?)')
+    .get(goal.user_id, skillName)
+  if (!skill) {
+    const ins = db
+      .prepare('INSERT INTO skills (user_id, name, category, current_mastery, target_mastery, current_level, target_level) VALUES (?,?,?,?,?,?,?)')
+      .run(goal.user_id, skillName, SKILL_CATEGORY[key] || 'Technical', 0, 80, goal.current_level || 'Beginner', goal.target_level || 'Advanced')
+    skill = db.prepare('SELECT * FROM skills WHERE id = ?').get(Number(ins.lastInsertRowid))
+  }
+  return skill
+}
+
+// A weak area within a goal (from topics needing review), else null.
+export function goalWeakArea(goalId) {
+  const t = db
+    .prepare(`SELECT name FROM topics WHERE goal_id = ? AND status = 'needs_review' ORDER BY sort LIMIT 1`)
+    .get(goalId)
+  return t?.name || null
+}
+
+// ---------------------------------------------------------------------------
 // 2. Daily planner
 // ---------------------------------------------------------------------------
 export function generateDailyPlan(user, date = now()) {
@@ -412,7 +483,8 @@ export function completeTask(taskId, log) {
   if (!task) throw new Error('Task not found')
   db.prepare('UPDATE tasks SET status = ? WHERE id = ?').run(log.status || 'completed', taskId)
 
-  const date = now()
+  const user = task.user_id ? db.prepare('SELECT * FROM users WHERE id = ?').get(task.user_id) : null
+  const date = user ? userToday(user) : now()
   db.prepare(
     `INSERT INTO task_logs (task_id, date, status, actual_minutes, difficulty, confidence, notes, questions, learned)
      VALUES (?,?,?,?,?,?,?,?,?)`
@@ -501,11 +573,13 @@ function advanceFrontier(goalId) {
 
 function scheduleSpacedRevision(topicId, topic) {
   const g = db.prepare('SELECT user_id FROM goals WHERE id = ?').get(topic.goal_id)
+  const user = g?.user_id ? db.prepare('SELECT * FROM users WHERE id = ?').get(g.user_id) : null
+  const base = user ? userToday(user) : now()
   SPACED_INTERVALS.forEach((days) => {
     db.prepare(
       `INSERT INTO revision_schedule (user_id, topic_id, goal_id, topic_name, due_date, interval_days, status, source)
        VALUES (?,?,?,?,?,?,?,?)`
-    ).run(g?.user_id || null, topicId, topic.goal_id, topic.name, addDays(now(), days), days, 'pending', 'spaced')
+    ).run(g?.user_id || null, topicId, topic.goal_id, topic.name, addDays(base, days), days, 'pending', 'spaced')
   })
 }
 
@@ -546,11 +620,20 @@ function levelFromMastery(m) {
 }
 
 export function computeSkillMastery(skill) {
+  return computeSkillMasteryDetail(skill).overall
+}
+
+// Component breakdown so mastery is transparent and defensible:
+// knowledge (lessons) · practical (exercises) · assessment · confidence · recency · project
+export function computeSkillMasteryDetail(skill) {
   const goals = db
     .prepare('SELECT id FROM goals WHERE user_id = ? AND lower(name) LIKE ?')
     .all(skill.user_id, `%${skill.name.toLowerCase()}%`)
   const goalIds = goals.map((g) => g.id)
-  if (!goalIds.length) return skill.current_mastery ?? 0
+  if (!goalIds.length) {
+    const m = skill.current_mastery ?? 0
+    return { overall: m, knowledge: m, practical: m, assessment: 0, confidence: 0, recency: 0, project: false, sampleSize: 0 }
+  }
 
   const placeholders = goalIds.map(() => '?').join(',')
   const topics = db.prepare(`SELECT status FROM topics WHERE goal_id IN (${placeholders})`).all(...goalIds)
@@ -576,9 +659,26 @@ export function computeSkillMastery(skill) {
 
   const hasProject = topics.some((t) => t.status === 'completed' && /capstone|project|assessment|mastery/i.test(t.name || ''))
 
+  const knowledge = Math.round(topicScore)
+  const practical = Math.round(topicScore) // exercises are embedded in topic completion
+  const assessment = Math.round(assessScore)
+  const confidence = Math.round(confScore)
+  const project = hasProject
+
   const mastery =
     topicScore * 0.3 + assessScore * 0.35 + confScore * 0.2 + recency * 0.15 + (hasProject ? 10 : 0)
-  return Math.max(0, Math.min(100, Math.round(mastery)))
+  const overall = Math.max(0, Math.min(100, Math.round(mastery)))
+
+  return {
+    overall,
+    knowledge,
+    practical,
+    assessment,
+    confidence,
+    recency: Math.round(recency),
+    project,
+    sampleSize: topics.length + assessments.length + sessions.length,
+  }
 }
 
 // ---------------------------------------------------------------------------

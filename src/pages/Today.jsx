@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { RefreshCw, Check, Clock, Flame, BookOpen, Wrench, Hammer, HelpCircle, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { RefreshCw, Check, Clock, Flame, BookOpen, Wrench, Hammer, HelpCircle, RotateCcw, CheckCircle2, Play, Square } from 'lucide-react'
 import { api } from '../api.js'
 import { Card, Bar, Badge, Modal, Stars, Spinner, TaskCheck } from '../components.jsx'
 
@@ -47,6 +47,7 @@ export default function Today() {
 
   return (
     <div>
+      <SessionTracker />
       {/* header */}
       <div className="grid cols-2 mb" style={{ gridTemplateColumns: '1.6fr 1fr' }}>
         <Card>
@@ -131,6 +132,118 @@ export default function Today() {
         <ReflectModal task={reflecting} onClose={() => setReflecting(null)} onSubmit={(r) => complete(reflecting, r)} />
       )}
     </div>
+  )
+}
+
+function SessionTracker() {
+  const [session, setSession] = useState(null)
+  const [topicName, setTopicName] = useState('')
+  const [elapsed, setElapsed] = useState(0)
+  const [ending, setEnding] = useState(false)
+
+  const load = () => api.activeSession().then((s) => setSession(s || null))
+  useEffect(() => { load() }, [])
+
+  useEffect(() => {
+    if (!session?.started_at) return
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - new Date(session.started_at).getTime()) / 1000)))
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => clearInterval(t)
+  }, [session?.started_at])
+
+  const start = async () => {
+    const s = await api.startSession({ topic_name: topicName || undefined })
+    setSession(s)
+    setTopicName('')
+  }
+  const end = async (reflection) => {
+    await api.endSession(session.id, reflection)
+    setSession(null)
+    setEnding(false)
+    setElapsed(0)
+  }
+
+  if (!session) {
+    return (
+      <Card className="mb" title="Start a learning session" sub="Track real time spent and capture reflection at the end">
+        <div className="flex" style={{ gap: 10 }}>
+          <input className="input" style={{ flex: 1 }} placeholder="What are you learning? (optional)" value={topicName} onChange={(e) => setTopicName(e.target.value)} />
+          <button className="btn primary" onClick={start}><Play size={15} /> Start learning</button>
+        </div>
+      </Card>
+    )
+  }
+
+  const mm = String(Math.floor(elapsed / 60)).padStart(2, '0')
+  const ss = String(elapsed % 60).padStart(2, '0')
+
+  return (
+    <Card className="mb">
+      <div className="flex-between">
+        <div className="flex" style={{ gap: 12 }}>
+          <span className="badge green" style={{ gap: 6 }}>
+            <span className="dot" style={{ width: 8, height: 8, borderRadius: 50, background: 'var(--green)', animation: 'pulse 1.5s infinite', display: 'inline-block' }} />
+            In progress
+          </span>
+          <b>{session.topic_name || 'Learning session'}</b>
+        </div>
+        <div className="flex" style={{ gap: 12, alignItems: 'center' }}>
+          <span className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{mm}:{ss}</span>
+          <button className="btn danger" onClick={() => setEnding(true)}><Square size={15} /> End session</button>
+        </div>
+      </div>
+      {ending && <EndSessionModal onClose={() => setEnding(false)} onSubmit={end} />}
+    </Card>
+  )
+}
+
+function EndSessionModal({ onClose, onSubmit }) {
+  const [confidence, setConfidence] = useState(3)
+  const [difficulty, setDifficulty] = useState('medium')
+  const [understood, setUnderstood] = useState('yes')
+  const [difficult, setDifficult] = useState('')
+  const [needHelp, setNeedHelp] = useState(false)
+  const [learned, setLearned] = useState('')
+
+  return (
+    <Modal title="End session — how did it go?" onClose={onClose}>
+      <div className="field">
+        <label>Did you understand the topic?</label>
+        <select className="select" value={understood} onChange={(e) => setUnderstood(e.target.value)}>
+          <option value="yes">Yes, clearly</option>
+          <option value="partial">Partially</option>
+          <option value="no">No, I'm confused</option>
+        </select>
+      </div>
+      <div className="field">
+        <label>Confidence</label>
+        <div className="flex" style={{ gap: 10 }}><Stars value={confidence} onChange={setConfidence} /><span className="small muted">{confidence}/5</span></div>
+      </div>
+      <div className="row2">
+        <div className="field"><label>Difficulty</label>
+          <select className="select" value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
+            <option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option>
+          </select>
+        </div>
+        <div className="field"><label>What was difficult?</label>
+          <input className="input" value={difficult} onChange={(e) => setDifficult(e.target.value)} placeholder="e.g. error handling" />
+        </div>
+      </div>
+      <div className="field"><label>What did you learn?</label>
+        <textarea className="textarea" value={learned} onChange={(e) => setLearned(e.target.value)} placeholder="Key takeaways…" /></div>
+      <div className="field">
+        <label className="flex" style={{ gap: 8, cursor: 'pointer' }}>
+          <input type="checkbox" checked={needHelp} onChange={(e) => setNeedHelp(e.target.checked)} /> I'd like extra help on this
+        </label>
+      </div>
+      <div className="flex" style={{ justifyContent: 'flex-end', gap: 10 }}>
+        <button className="btn" onClick={onClose}>Keep going</button>
+        <button className="btn primary" onClick={() => onSubmit({ confidence, difficulty, understood: understood === 'yes' ? 1 : understood === 'partial' ? 0 : -1, difficult, need_help: needHelp ? 1 : 0, learned })}>
+          Save session
+        </button>
+      </div>
+    </Modal>
   )
 }
 

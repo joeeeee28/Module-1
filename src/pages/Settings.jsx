@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import { Card, Spinner } from '../components.jsx'
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+const TIMEZONES = ['UTC', 'Asia/Kolkata', 'America/New_York', 'America/Los_Angeles', 'America/Chicago', 'Europe/London', 'Europe/Berlin', 'Europe/Paris', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Dubai', 'Australia/Sydney', 'Pacific/Auckland']
 
 export default function SettingsPage() {
   const [user, setUser] = useState(null)
@@ -30,7 +31,7 @@ export default function SettingsPage() {
     flash()
   }
   const saveNotif = async () => {
-    await api.saveSettings(settings.notifications)
+    await api.saveSettings({ notifications: settings.notifications, timezone: user.timezone, channel: settings.channel })
     flash()
   }
   const flash = () => { setSaved(true); setTimeout(() => setSaved(false), 1500) }
@@ -71,13 +72,31 @@ export default function SettingsPage() {
         </div>
         <div className="row2">
           <div className="field"><label>Morning briefing time</label><input className="input" type="time" value={user.briefing_time} onChange={set('briefing_time')} /></div>
+          <div className="field"><label>Timezone</label>
+            <select className="select" value={user.timezone || 'UTC'} onChange={set('timezone')}>
+              {TIMEZONES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
         </div>
         <div className="field"><label>Bio / notes</label><textarea className="textarea" value={user.bio || ''} onChange={set('bio')} /></div>
         <button className="btn primary" onClick={saveProfile}><Save size={15} /> {saved ? 'Saved ✓' : 'Save profile'}</button>
       </Card>
 
       <div>
-        <Card title="Notifications" sub="Choose what the agent sends you" actions={<Bell size={18} className="faint" />}>
+        <Card title="Notifications" sub="Choose what the agent sends you, and how" actions={<Bell size={18} className="faint" />}>
+          <div className="field">
+            <label>Delivery channel</label>
+            <select className="select" value={settings.channel || 'in-app'} onChange={(e) => setSettings({ ...settings, channel: e.target.value })}>
+              <option value="in-app">In-app only</option>
+              <option value="webhook">Webhook (configure WEBHOOK_URL)</option>
+              <option value="telegram">Telegram (configure bot)</option>
+              <option value="email">Email (configure SMTP)</option>
+              <option value="all">All available</option>
+            </select>
+            <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+              Delivery status is recorded per message — nothing is marked "sent" unless the channel accepted it.
+            </div>
+          </div>
           {[
             { k: 'morningBriefing', l: 'Morning briefing', d: 'Daily AI learning plan each morning' },
             { k: 'learningReminder', l: 'Learning reminder', d: "Nudge if today's session hasn't started" },

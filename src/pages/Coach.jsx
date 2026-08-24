@@ -5,9 +5,9 @@ import { api } from '../api.js'
 import { Spinner } from '../components.jsx'
 
 const SUGGESTIONS = [
-  'What should I learn next?',
-  'Quiz me on Python',
-  "I don't understand REST APIs",
+  'What should I learn today?',
+  'What am I weak at?',
+  'Quiz me',
   'Give me a real-world example',
   'Why am I learning this?',
   'Review what I learned this week',
@@ -17,10 +17,11 @@ const SUGGESTIONS = [
 
 export default function Coach() {
   const [messages, setMessages] = useState([
-    { role: 'ai', text: "Hi! I'm your learning coach. I use your real goals, roadmap and progress to help you. What would you like help with?" },
+    { role: 'ai', text: "Hi! I'm your learning coach. I answer from your **real** goals, roadmap, and history — not generic knowledge. What do you need?" },
   ])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [source, setSource] = useState(null)
   const logRef = useRef(null)
 
   useEffect(() => {
@@ -36,6 +37,7 @@ export default function Coach() {
     try {
       const r = await api.coach(msg)
       setMessages((m) => [...m, { role: 'ai', text: r.text, type: r.type }])
+      setSource(r.source)
     } catch (e) {
       setMessages((m) => [...m, { role: 'ai', text: 'Sorry, something went wrong: ' + e.message }])
     }
@@ -74,6 +76,11 @@ export default function Coach() {
             <Send size={15} /> Send
           </button>
         </div>
+        {source && (
+          <div className="small faint mt" style={{ textAlign: 'right' }}>
+            {source === 'model' ? '⚡ Answered by AI model with your live context' : '🧠 Answered by the built-in learning engine'}
+          </div>
+        )}
       </div>
     </div>
   )

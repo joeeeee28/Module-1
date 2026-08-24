@@ -3,7 +3,7 @@ import { Routes, Route, Navigate, NavLink, useLocation, Link } from 'react-route
 import {
   LayoutDashboard, Sun, Target, Route as RouteIcon, Layers, Calendar, Link2,
   StickyNote, GraduationCap, TrendingUp, Sparkles, ClipboardList, Settings,
-  Menu, LogOut, Sparkle,
+  Menu, LogOut, Sparkle, Activity, Bell,
 } from 'lucide-react'
 import { api, getToken, setToken } from './api.js'
 import Dashboard from './pages/Dashboard.jsx'
@@ -19,6 +19,7 @@ import Progress from './pages/Progress.jsx'
 import Coach from './pages/Coach.jsx'
 import Review from './pages/Review.jsx'
 import SettingsPage from './pages/Settings.jsx'
+import AgentActivity from './pages/AgentActivity.jsx'
 
 const AuthContext = createContext(null)
 export const useAuth = () => useContext(AuthContext)
@@ -43,6 +44,7 @@ const NAV = [
   { group: 'Insight', items: [
     { to: '/coach', icon: <Sparkles />, label: 'AI Coach' },
     { to: '/review', icon: <ClipboardList />, label: 'Weekly Review' },
+    { to: '/activity', icon: <Activity />, label: 'Agent Activity' },
   ]},
   { group: '', items: [
     { to: '/settings', icon: <Settings />, label: 'Settings' },
@@ -71,8 +73,8 @@ function AuthProvider({ children }) {
     setToken(token)
     setUser(user)
   }
-  const signup = async (name, email, password) => {
-    const { token, user } = await api.signup(name, email, password)
+  const signup = async (name, email, password, timezone) => {
+    const { token, user } = await api.signup(name, email, password, timezone)
     setToken(token)
     setUser(user)
   }
@@ -91,7 +93,7 @@ function Layout() {
     '/roadmap': 'Learning Roadmap', '/skills': 'Skills', '/calendar': 'Calendar',
     '/resources': 'Resources', '/notes': 'Notes', '/assessments': 'Assessments',
     '/progress': 'Progress', '/coach': 'AI Coach', '/review': 'Weekly Review',
-    '/settings': 'Settings',
+    '/activity': 'Agent Activity', '/settings': 'Settings',
   }
   const title = titles[loc.pathname] || (loc.pathname.startsWith('/goals/') ? 'Goal details' : 'LearnMate')
 
@@ -139,6 +141,7 @@ function Layout() {
           </div>
           <div className="flex gap-lg">
             {user && <span className="muted small">Hi {user.name.split(' ')[0]} 👋</span>}
+            <NotificationsBell />
           </div>
         </div>
         <div className="content">
@@ -157,6 +160,7 @@ function Layout() {
             <Route path="/progress" element={<Progress />} />
             <Route path="/coach" element={<Coach />} />
             <Route path="/review" element={<Review />} />
+            <Route path="/activity" element={<AgentActivity />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -174,6 +178,11 @@ function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [cfg, setCfg] = useState(null)
+
+  useEffect(() => {
+    api.config().then(setCfg).catch(() => {})
+  }, [])
 
   const submit = async (e) => {
     e.preventDefault()
@@ -181,7 +190,7 @@ function Login() {
     setBusy(true)
     try {
       if (mode === 'login') await login(email, password)
-      else await signup(name, email, password)
+      else await signup(name, email, password, Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
     } catch (err) {
       setError(err.message)
     }
@@ -220,13 +229,17 @@ function Login() {
         </form>
         <div className="hint">
           {mode === 'login' ? (
-            <>Demo account: <b>alex@example.com</b> / <b>demo</b></>
+            cfg?.seedDemo ? (
+              <>Demo account: <b>alex@example.com</b> / <b>demo</b></>
+            ) : (
+              <>No account yet? <a href="#" style={{ color: 'var(--accent-3)' }} onClick={(e) => { e.preventDefault(); setMode('signup') }}>Create one</a></>
+            )
           ) : (
             <>Already have an account? <a href="#" style={{ color: 'var(--accent-3)' }} onClick={(e) => { e.preventDefault(); setMode('login') }}>Sign in</a></>
           )}
         </div>
         <div className="hint">
-          {mode === 'login' && (
+          {mode === 'login' && cfg?.seedDemo && (
             <>New here? <a href="#" style={{ color: 'var(--accent-3)' }} onClick={(e) => { e.preventDefault(); setMode('signup') }}>Create an account</a></>
           )}
         </div>
@@ -248,4 +261,54 @@ function Gate() {
   if (loading) return <div className="login-wrap"><span className="muted">Loading…</span></div>
   if (!user) return <Login />
   return <Layout />
+}
+
+function NotificationsBell() {
+  const [open, setOpen] = useState(false)
+  const [items, setItems] = useState([])
+  const [count, setCount] = useState(0)
+
+  const load = async () => {
+    try {
+      const n = await api.notifications()
+      setItems(n)
+      setCount(n.filter((x) => !x.read).length)
+    } catch { /* ignore */ }
+  }
+  useEffect(() => { load() }, [])
+  useEffect(() => {
+    if (open) {
+      api.readAllNotifications().then(load)
+    }
+  }, [open])
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button className="btn icon ghost" onClick={() => setOpen(!open)}>
+        <Bell size={19} />
+        {count > 0 && (
+          <span style={{ position: 'absolute', top: -2, right: -2, background: 'var(--red)', color: '#fff', fontSize: 10, fontWeight: 700, borderRadius: 99, padding: '1px 5px' }}>{count}</span>
+        )}
+      </button>
+      {open && (
+        <div className="card" style={{ position: 'absolute', right: 0, top: 42, width: 340, maxHeight: 420, overflowY: 'auto', zIndex: 200, boxShadow: 'var(--shadow)' }}>
+          <div className="flex-between mb" style={{ marginBottom: 10 }}>
+            <b className="small">Notifications</b>
+            <button className="btn ghost sm" onClick={() => api.readAllNotifications().then(load)}>Mark all read</button>
+          </div>
+          {items.length === 0 && <div className="muted small">No notifications yet.</div>}
+          {items.map((n) => (
+            <div key={n.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+              <div className="flex-between">
+                <span className="small" style={{ fontWeight: n.read ? 500 : 700 }}>{n.title}</span>
+                <span className={`badge ${n.status === 'delivered' ? 'green' : n.status === 'failed' ? 'red' : 'gray'}`}>{n.channel}</span>
+              </div>
+              {n.body && <div className="small faint">{n.body}</div>}
+              <div className="small faint" style={{ fontSize: 11 }}>{n.created_at} · {n.status}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }

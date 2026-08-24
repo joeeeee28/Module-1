@@ -21,6 +21,21 @@ export default function Dashboard() {
   const b = today.briefing
   const todayPct = today.total ? Math.round((today.done / today.total) * 100) : 0
 
+  if (goals.length === 0 && skills.length === 0) {
+    return (
+      <div className="empty" style={{ maxWidth: 560, margin: '0 auto' }}>
+        <div className="icon">👋</div>
+        <div style={{ fontWeight: 700, fontSize: 17 }}>Welcome, {user.name.split(' ')[0]}!</div>
+        <div className="muted small mt" style={{ marginTop: 8 }}>
+          No learning data yet — the agent will build everything from scratch as you add goals.
+        </div>
+        <div className="mt">
+          <Link to="/goals" className="btn primary"><Target size={15} /> Create your first learning goal</Link>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div>
       <div className="mb">
@@ -77,6 +92,24 @@ export default function Dashboard() {
                   <CheckCircle2 size={14} style={{ color: 'var(--green)' }} /> {s}
                 </div>
               ))}
+            </div>
+          )}
+
+          {b?.why && (
+            <div className="mt small muted"><b style={{ color: 'var(--text)' }}>Why this matters:</b> {b.why}</div>
+          )}
+          {b?.weakArea && (
+            <div className="mt small muted"><b style={{ color: 'var(--amber)' }}>Weak area to watch:</b> {b.weakArea}</div>
+          )}
+          {b?.recommendedResource && (
+            <div className="mt small" style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg-2)' }}>
+              <div className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 3 }}>Recommended resource</div>
+              <a href={b.recommendedResource.url} target="_blank" rel="noreferrer" style={{ fontWeight: 600, color: 'var(--accent-3)' }}>
+                {b.recommendedResource.title} ↗
+              </a>
+              <span className="faint" style={{ marginLeft: 8, fontSize: 11 }}>
+                ({b.recommendedResource.source}{b.recommendedResource.verified ? ' · verified' : ' · not verified'})
+              </span>
             </div>
           )}
         </Card>

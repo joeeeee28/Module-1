@@ -2,12 +2,13 @@ import { DatabaseSync } from 'node:sqlite'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { config } from './config.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const DATA_DIR = path.join(__dirname, '..', 'data')
+const DB_PATH = config.databasePath
+const DATA_DIR = path.dirname(DB_PATH)
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
 
-const DB_PATH = path.join(DATA_DIR, 'app.db')
 export const db = new DatabaseSync(DB_PATH)
 
 db.exec('PRAGMA journal_mode = WAL;')
@@ -20,6 +21,7 @@ export function migrate() {
     name TEXT NOT NULL,
     email TEXT UNIQUE,
     password_hash TEXT,
+    password_salt TEXT,
     role TEXT,
     career_goal TEXT,
     target_role TEXT,
@@ -27,8 +29,10 @@ export function migrate() {
     daily_learning_minutes INTEGER DEFAULT 45,
     preferred_days TEXT DEFAULT '["Mon","Tue","Wed","Thu","Fri"]',
     briefing_time TEXT DEFAULT '07:30',
+    timezone TEXT DEFAULT 'UTC',
     learning_style TEXT DEFAULT 'Hands-on / project-based',
     bio TEXT,
+    notification_channel TEXT DEFAULT 'in-app',
     created_at TEXT DEFAULT (datetime('now'))
   );
 
@@ -148,7 +152,12 @@ export function migrate() {
     notes TEXT,
     learned TEXT,
     status TEXT DEFAULT 'completed',
-    kind TEXT DEFAULT 'learn'
+    kind TEXT DEFAULT 'learn',
+    started_at TEXT,
+    ended_at TEXT,
+    understood INTEGER,
+    difficult_part TEXT,
+    need_help INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS assessments (
@@ -174,6 +183,11 @@ export function migrate() {
     title TEXT NOT NULL,
     url TEXT,
     type TEXT,
+    source TEXT DEFAULT 'manual',
+    topic TEXT,
+    discovered_at TEXT DEFAULT (datetime('now')),
+    last_verified TEXT,
+    verified INTEGER DEFAULT 0,
     notes TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
@@ -213,7 +227,79 @@ export function migrate() {
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    agent TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS learning_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    category TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT DEFAULT 'derived',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    goal_id INTEGER,
+    name TEXT NOT NULL,
+    objective TEXT,
+    requirements_json TEXT DEFAULT '[]',
+    technologies_json TEXT DEFAULT '[]',
+    milestones_json TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'planned',
+    evaluation TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT,
+    channel TEXT DEFAULT 'in-app',
+    status TEXT DEFAULT 'pending',
+    error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    delivered_at TEXT,
+    read INTEGER DEFAULT 0
+  );
   `)
+
+  ensureColumn('users', 'timezone', "TEXT DEFAULT 'UTC'")
+  ensureColumn('users', 'password_salt', 'TEXT')
+  ensureColumn('users', 'notification_channel', "TEXT DEFAULT 'in-app'")
+  ensureColumn('sessions', 'started_at', 'TEXT')
+  ensureColumn('sessions', 'ended_at', 'TEXT')
+  ensureColumn('sessions', 'understood', 'INTEGER')
+  ensureColumn('sessions', 'difficult_part', 'TEXT')
+  ensureColumn('sessions', 'need_help', 'INTEGER')
+  ensureColumn('resources', 'source', "TEXT DEFAULT 'manual'")
+  ensureColumn('resources', 'topic', 'TEXT')
+  ensureColumn('resources', 'discovered_at', 'TEXT')
+  ensureColumn('resources', 'last_verified', 'TEXT')
+  ensureColumn('resources', 'verified', 'INTEGER DEFAULT 0')
+}
+
+// Idempotent column addition for upgrading existing databases.
+function ensureColumn(table, column, definition) {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+  } catch {
+    // column already exists
+  }
 }
 
 // small helpers
@@ -235,6 +321,28 @@ export function daysBetween(a, b) {
   const da = new Date(a + 'T00:00:00')
   const db = new Date(b + 'T00:00:00')
   return Math.round((db - da) / 86400000)
+}
+
+// Local date (YYYY-MM-DD) in a given IANA timezone. Defaults to server-local.
+export function tzDate(timezone, date = new Date()) {
+  try {
+    if (!timezone || timezone === 'UTC') return date.toISOString().slice(0, 10)
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date)
+    const get = (t) => parts.find((p) => p.type === t)?.value
+    return `${get('year')}-${get('month')}-${get('day')}`
+  } catch {
+    return date.toISOString().slice(0, 10)
+  }
+}
+
+// "Now" as an ISO date in the user's timezone.
+export function userToday(user) {
+  return tzDate(user?.timezone, new Date())
 }
 
 export function getSetting(key, fallback = null) {
