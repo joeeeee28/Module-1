@@ -272,6 +272,16 @@ input, textarea, select { font-family: inherit; }
 .suggestion { display: inline-block; font-size: 12.5px; padding: 6px 11px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-muted); cursor: pointer; margin: 0 6px 8px 0; transition: all 0.15s; }
 .suggestion:hover { color: var(--text); border-color: var(--border-strong); }
 
+/* notification bell + history */
+.page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 12px; }
+.page-title { font-size: 20px; font-weight: 800; margin: 0 0 2px; letter-spacing: -0.01em; }
+.page-sub { color: var(--text-muted); font-size: 13px; }
+.notif-item { padding: 10px 12px; border-radius: 10px; cursor: pointer; margin: 3px 0; transition: background 0.12s; }
+.notif-item:hover { background: var(--surface-2); }
+.notif-item.unread { background: rgba(99, 102, 241, 0.08); }
+.notif-group { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); font-weight: 700; padding: 10px 4px 4px; }
+.table-wrap { overflow-x: auto; }
+
 /* coach layout: conversation sidebar + chat panel */
 .coach-wrap { display: flex; gap: 16px; height: calc(100vh - 200px); }
 .chat-sidebar { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }

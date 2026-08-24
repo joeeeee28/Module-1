@@ -20,6 +20,8 @@ import {
 } from './engine.js'
 import { discoverResources, getCurrentInfo } from './discovery.js'
 import { memorySummary } from './memory.js'
+import { getPreferences, setPreferences } from '../agent/preferences.js'
+import { notifyUser } from '../agent/notify.js'
 
 // ---- small query helpers used by several tools ----------------------------
 
@@ -347,6 +349,46 @@ export const tools = [
         memoryWeak,
         combined: [...new Set([...weakTopics, ...weakSessions, ...memoryWeak])].slice(0, 8),
       }
+    },
+  },
+  {
+    name: 'get_notification_preferences',
+    description: "Return the user's notification preferences for email and in-app channels.",
+    handler: (params, { uid }) => {
+      return { preferences: getPreferences(uid) }
+    },
+  },
+  {
+    name: 'set_notification_preferences',
+    description:
+      'Update notification preferences. Supports turning the daily plan email on/off (emailMorning), task reminder emails on/off (emailTaskReminders), in-app toggles, quiet hours, or the notification email address.',
+    handler: (params, { uid, user }) => {
+      const patch = {}
+      if (params.emailMorning !== undefined) patch.email = { toggles: { morning: Boolean(params.emailMorning) } }
+      if (params.emailTaskReminders !== undefined) patch.email = { toggles: { taskReminder: Boolean(params.emailTaskReminders) } }
+      if (params.enableEmail !== undefined) patch.email = { enabled: Boolean(params.enableEmail), address: user.notification_email || user.email || '' }
+      if (params.quietHours !== undefined) patch.quietHours = params.quietHours
+      const prefs = setPreferences(uid, patch)
+      return { preferences: prefs, applied: patch }
+    },
+  },
+  {
+    name: 'create_reminder',
+    description: 'Create a learning reminder for the user (e.g. "remind me to study Python tomorrow morning").',
+    handler: async (params, { uid, user }) => {
+      const topic = params.topic || 'your learning'
+      const when = params.when || 'tomorrow morning'
+      const results = await notifyUser({
+        user,
+        type: 'reminder',
+        title: `⏰ Reminder: ${topic}`,
+        message: `You asked to be reminded to study ${topic} — scheduled for ${when}.`,
+        priority: 'medium',
+        actionUrl: params.url || null,
+        metadata: { firstName: user?.name?.split(' ')[0] || 'there', topic, when, subject: `Reminder: ${topic}` },
+        entityKey: `reminder:${topic.toLowerCase()}:${new Date().toISOString().slice(0, 10)}`,
+      })
+      return { reminder: { topic, when }, notification: results[0] || null }
     },
   },
   {

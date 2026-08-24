@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { scryptSync, randomBytes, timingSafeEqual, createHmac } from 'node:crypto'
 import { db, migrate, now, addDays, getSetting, setSetting, userToday } from './db.js'
-import { config, logger, aiConfigured, searchConfigured, VERSION } from './config.js'
+import { config, logger, aiConfigured, searchConfigured, emailConfigured, VERSION } from './config.js'
 import { seedIfEmpty } from './seed.js'
 import {
   generateRoadmap,
@@ -27,7 +27,28 @@ import { handleMessage } from './ai/agent.js'
 import { discoverResources, getCurrentInfo } from './ai/discovery.js'
 import { recordMemory, getMemory, deriveMemory, memorySummary } from './ai/memory.js'
 import { runMorningAgent } from './agent/morning.js'
-import { sendNotification, listNotifications, markRead, unreadCount } from './agent/notify.js'
+import {
+  listNotifications,
+  listAllNotifications,
+  markRead,
+  markAllRead,
+  unreadCount,
+  processEmailQueue,
+  emailHealth,
+} from './agent/notify.js'
+import { getPreferences, setPreferences, notificationEmail } from './agent/preferences.js'
+import { sendEmail } from './agent/email.js'
+import {
+  notifyTestEmail,
+  notifyMorningPlan,
+  notifyTaskReminders,
+  notifyMissedTasks,
+  notifyRevisionsDue,
+  notifyAssessmentReady,
+  notifyGoalDeadlines,
+  notifyWeeklyReview,
+  notifyMonthlyReview,
+} from './agent/generators.js'
 import { logAgentRun, listAgentRuns } from './agent/runlog.js'
 import { startScheduler, isSchedulerRunning } from './agent/scheduler.js'
 
@@ -140,7 +161,9 @@ app.get('/api/config', (req, res) => {
     searchConfigured: searchConfigured(),
     telegramConfigured: Boolean(config.telegramBotToken && config.telegramChatId),
     webhookConfigured: Boolean(config.webhookUrl),
-    emailConfigured: Boolean(config.smtpHost && config.smtpFrom),
+    emailConfigured: emailConfigured(),
+    emailProvider: config.emailProvider || null,
+    notificationEnv: config.notificationEnv,
     seedDemo: config.seedDemo,
     version: VERSION,
   })
@@ -301,12 +324,17 @@ app.get('/api/plan/today', (req, res) => {
   const tasks = db.prepare('SELECT * FROM tasks WHERE daily_plan_id = ? ORDER BY sort').all(plan.id)
   res.json({ plan, tasks, briefing: JSON.parse(plan.briefing_json || '{}') })
 })
-app.post('/api/plan/generate', (req, res) => {
+app.post('/api/plan/generate', async (req, res) => {
   const u = currentUser(req)
   const date = req.body?.date || userToday(u)
   const { plan, briefing } = generateDailyPlan(u, date)
   const tasks = db.prepare('SELECT * FROM tasks WHERE daily_plan_id = ? ORDER BY sort').all(plan.id)
   logAgentRun(u.id, 'Planner Agent', 'Generated daily plan (manual)', `planId=${plan.id} topic=${briefing.topic}`)
+  try {
+    await notifyMorningPlan(u, briefing, plan)
+  } catch (e) {
+    logger.warn('notify', 'Plan notification failed', { error: e.message })
+  }
   res.json({ plan, tasks, briefing })
 })
 app.post('/api/tasks/:id/complete', (req, res) => {
@@ -838,7 +866,16 @@ app.get('/api/settings', (req, res) => {
     weeklyReview: true,
   })
   const u = currentUser(req)
-  res.json({ notifications: notif, briefingTime: u?.briefing_time || '07:30', timezone: u?.timezone || 'UTC', channel: u?.notification_channel || 'in-app' })
+  const prefs = getPreferences(u?.id)
+  res.json({
+    notifications: notif,
+    briefingTime: u?.briefing_time || '07:30',
+    timezone: u?.timezone || 'UTC',
+    channel: u?.notification_channel || 'in-app',
+    notificationPrefs: prefs,
+    notificationEmail: notificationEmail(u),
+    emailVerified: Boolean(u?.email_verified),
+  })
 })
 app.put('/api/settings', (req, res) => {
   const u = currentUser(req)
@@ -857,7 +894,26 @@ app.put('/api/settings', (req, res) => {
 // In-app notification inbox + read state.
 app.get('/api/notifications', (req, res) => {
   const uid = currentUser(req)?.id
-  res.json(listNotifications(uid))
+  const opts = {
+    limit: Number(req.query.limit || 50),
+    channel: req.query.channel,
+    status: req.query.status,
+    read: req.query.read,
+  }
+  res.json(listNotifications(uid, opts))
+})
+app.get('/api/notifications/history', (req, res) => {
+  const uid = currentUser(req)?.id
+  const all = listAllNotifications(uid)
+  const filtered = all.filter((n) => {
+    if (req.query.channel && n.channel !== req.query.channel) return false
+    if (req.query.status && n.status !== req.query.status) return false
+    if (req.query.read === 'read' && !n.read) return false
+    if (req.query.read === 'unread' && n.read) return false
+    if (req.query.date && !String(n.created_at).startsWith(req.query.date)) return false
+    return true
+  })
+  res.json({ notifications: filtered, email: emailHealth() })
 })
 app.get('/api/notifications/unread', (req, res) => {
   const uid = currentUser(req)?.id
@@ -870,8 +926,97 @@ app.post('/api/notifications/:id/read', (req, res) => {
 })
 app.post('/api/notifications/read-all', (req, res) => {
   const uid = currentUser(req)?.id
-  db.prepare('UPDATE notifications SET read = 1 WHERE user_id = ?').run(uid)
+  markAllRead(uid)
   res.json({ ok: true })
+})
+
+// Notification preferences
+app.get('/api/notifications/preferences', (req, res) => {
+  const uid = currentUser(req)?.id
+  const user = currentUser(req)
+  const prefs = getPreferences(uid)
+  res.json({
+    ...prefs,
+    email: {
+      ...prefs.email,
+      address: notificationEmail(user),
+      accountEmail: user.email || '',
+      verified: Boolean(user.email_verified),
+      enabled: Boolean(user.email_notifications_enabled),
+    },
+    emailHealth: emailHealth(),
+  })
+})
+app.put('/api/notifications/preferences', (req, res) => {
+  const uid = currentUser(req)?.id
+  const prefs = setPreferences(uid, req.body || {})
+  res.json(prefs)
+})
+
+// Send an email verification code to the configured notification email.
+app.post('/api/notifications/email/send-verification', async (req, res) => {
+  const user = currentUser(req)
+  const uid = user.id
+  const email = (req.body?.email || user.notification_email || user.email || '').trim()
+  if (!email) return res.status(400).json({ error: 'No email address to verify' })
+  const code = String(Math.floor(100000 + Math.random() * 900000))
+  db.prepare('INSERT INTO email_verifications (user_id, email, code) VALUES (?,?,?)').run(uid, email, code)
+  db.prepare('UPDATE users SET notification_email = ?, email_verified = 0 WHERE id = ?').run(email, uid)
+  const subject = 'Verify your LearnMate notification email'
+  const html = `<div style="background:#111827;color:#e7ecf5;font-family:system-ui;padding:24px;border-radius:12px">
+    <h2>Verify your email</h2>
+    <p>Use this code to enable email notifications from LearnMate:</p>
+    <p style="font-size:28px;font-weight:800;letter-spacing:6px;color:#22d3ee">${code}</p>
+    <p style="color:#98a2b6;font-size:13px">If you didn't request this, you can ignore it.</p></div>`
+  const result = await sendEmail({ to: email, subject, html })
+  if (!result.ok) return res.status(502).json({ error: 'Failed to send verification email: ' + result.error })
+  res.json({ ok: true, message: 'Verification email sent' })
+})
+app.post('/api/notifications/email/verify', (req, res) => {
+  const uid = currentUser(req)?.id
+  const { code } = req.body || {}
+  if (!code) return res.status(400).json({ error: 'Code required' })
+  const row = db.prepare('SELECT * FROM email_verifications WHERE user_id = ? AND code = ? AND used = 0 ORDER BY id DESC LIMIT 1').get(uid, String(code))
+  if (!row) return res.status(400).json({ error: 'Invalid or expired code' })
+  db.prepare('UPDATE email_verifications SET used = 1 WHERE id = ?').run(row.id)
+  db.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').run(uid)
+  setPreferences(uid, { email: { verified: true } })
+  res.json({ ok: true, message: 'Email verified' })
+})
+
+// Send a test email + in-app notification (dev-safe; provider decides delivery).
+app.post('/api/notifications/test', async (req, res) => {
+  const user = currentUser(req)
+  const results = await notifyTestEmail(user)
+  // Email is queued; drain immediately so the caller gets a real acceptance result.
+  const drained = await processEmailQueue()
+  const emailRows = results.filter((r) => r.channel === 'email')
+  const status = emailRows[0]?.status || (emailConfigured() && drained > 0 ? 'sent' : 'not-email')
+  const failed = emailRows.some((r) => r.status === 'failed')
+  if (failed) return res.status(502).json({ ok: false, error: 'Email delivery failed. Your learning plan is still available in the app.', notifications: results })
+  res.json({ ok: true, status, message: 'Test notification sent successfully', notifications: results })
+})
+
+// Manual notification trigger (dev/testing).
+app.post('/api/notifications/generate', async (req, res) => {
+  const user = currentUser(req)
+  const type = (req.body?.type || 'task_reminder')
+  const map = {
+    task_reminder: notifyTaskReminders,
+    missed_task: notifyMissedTasks,
+    revision: notifyRevisionsDue,
+    assessment: notifyAssessmentReady,
+    deadline: notifyGoalDeadlines,
+    weekly: notifyWeeklyReview,
+    monthly: notifyMonthlyReview,
+    test: notifyTestEmail,
+  }
+  const fn = map[type]
+  if (!fn) return res.status(400).json({ error: 'Unknown type' })
+  const results = await fn(user)
+  const emailCount = results.filter((r) => r.channel === 'email').length
+  if (emailCount) await processEmailQueue()
+  res.json({ ok: true, created: results.length, notifications: results })
 })
 
 // ---------------- agent (automation) ----------------

@@ -71,6 +71,9 @@ const INTENT_RULES = [
   ['harder', /harder|more challenging|challenge me|tougher|give me a harder|difficult(er)? version/i],
   ['easier', /easier|simpler|too hard|less advanced|beginner.{0,5}level|break it down more|step by step/i],
   ['weak', /weak|struggl|not good at|trouble (with|understanding)|need help (with|on)|improve on|where should i/i],
+  ['remind', /remind me (to|about)|remind me|set a reminder|remember to|nudge me/i],
+  ['notif_email_morning', /send me.{0,20}(plan|briefing|schedule).{0,20}email|by email every morning|email.{0,10}(my )?(plan|morning|daily)|morning.{0,15}email|daily.{0,10}email/i],
+  ['notif_stop_task_email', /stop.{0,15}(task|reminder).{0,15}email|no (more )?task (reminder )?emails|don('| i)t send.{0,20}(task|reminder)|turn off.{0,15}(task|reminder|email)/i],
   ['weekly', /weekly review|review (my|this) week|this week|summarize my week|how was my week|week in review/i],
   ['progress', /progress|how am i doing|am i (on track|doing)|status update|how('| i)s it going/i],
   ['memory', /what have i learned|what do i know|my strengths|remember|recap/i],
@@ -285,6 +288,25 @@ function extractTopicPhrase(message) {
   return m.replace(/[.!?]+$/, '').trim()
 }
 
+function extractReminderTopic(message, fallback) {
+  let m = message.replace(/^(remind me|please remind me|set a reminder|nudge me)\s+/i, '')
+  m = m.replace(/\bto (study|learn|review|practice|do|work on|revisit)\b/i, '')
+  m = m.replace(/\b(tomorrow|tonight|today|this (morning|afternoon|evening)|next (week|weekend)|in the morning|in the evening|at \d+\s?[ap]m)\b.*$/i, '')
+  m = m.replace(/[.!?]+$/, '').trim()
+  return m || fallback || 'your current topic'
+}
+
+function extractReminderWhen(message) {
+  const m = message.toLowerCase()
+  if (/tonight/.test(m)) return 'tonight'
+  if (/this afternoon/.test(m)) return 'this afternoon'
+  if (/this evening/.test(m)) return 'this evening'
+  if (/in the morning/.test(m)) return 'tomorrow morning'
+  if (/next week/.test(m)) return 'next week'
+  if (/tomorrow|in the morning/.test(m)) return 'tomorrow morning'
+  return 'tomorrow morning'
+}
+
 // ---- public entry point -----------------------------------------------------
 
 /**
@@ -423,6 +445,25 @@ export async function handleMessage(message, userId, opts = {}) {
       toolName = 'discover_learning_resources'
       data = await callAsync('discover_learning_resources', user, { topic })
       content = resourcesText(data)
+      break
+    }
+    case 'remind': {
+      const topic = extractReminderTopic(message, firstFrontier(userId).topic?.name)
+      toolName = 'create_reminder'
+      data = await callAsync('create_reminder', user, { topic, when: extractReminderWhen(message) })
+      content = `Got it — I've scheduled a reminder to study **${topic}** ${data.reminder.when}. You'll see it in your notifications. 🔔`
+      break
+    }
+    case 'notif_email_morning': {
+      toolName = 'set_notification_preferences'
+      data = callSync('set_notification_preferences', user, { emailMorning: true })
+      content = `Done — I've enabled your **daily learning plan email** so it arrives each morning. You can adjust this anytime in Notification Settings. 📧`
+      break
+    }
+    case 'notif_stop_task_email': {
+      toolName = 'set_notification_preferences'
+      data = callSync('set_notification_preferences', user, { emailTaskReminders: false })
+      content = `Done — I've turned off **task reminder emails**. Your in-app notifications are still active, and you can re-enable email anytime in Notification Settings.`
       break
     }
     case 'motivate':
