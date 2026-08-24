@@ -1,0 +1,30 @@
+{
+  "name": "learnmate",
+  "version": "1.0.0",
+  "description": "Personal AI Learning Management Agent",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "start:local": "npm run build && node server/index.js",
+    "agent": "node server/index.js",
+    "agent:morning": "node scripts/morning.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "lucide-react": "^0.454.0",
+    "marked": "^12.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "vite": "^5.4.6"
+  }
+}
