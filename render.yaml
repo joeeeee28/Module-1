@@ -1,0 +1,17 @@
+# Deploy LearnMate to Render.com with a single click (Blueprint).
+# The `data` disk persists your SQLite learning history across deploys.
+services:
+  - type: web
+    name: learnmate
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/auth/me
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
+    disk:
+      name: learnmate-data
+      mountPath: /app/data
+      sizeGB: 1
