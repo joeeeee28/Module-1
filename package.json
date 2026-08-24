@@ -12,6 +12,7 @@
     "start:local": "npm run build && node server/index.js",
     "agent": "node server/index.js",
     "agent:morning": "node scripts/morning.js",
+    "notifications:test": "node scripts/notifications-send.js",
     "test": "node --test"
   },
   "dependencies": {

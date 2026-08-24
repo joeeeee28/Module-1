@@ -92,6 +92,67 @@ from your stored data. Setting `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) upgrade
 AI Coach and open-ended answers to a real LLM with your full learning context. Without
 a key, nothing is faked — the UI labels every response with its source (`engine` vs `model`).
 
+### AI Coach (chat agent)
+
+The **AI Coach** (`/coach`) is a multi-turn chat agent:
+
+- **Tool-calling layer** (`server/ai/tools.js`) — 20+ server-side tools that read and
+  mutate your real data: profile, goals, roadmap, skill mastery, sessions, pending &
+  revision tasks, plan generation, task completion/rescheduling, goal creation, quizzes,
+  weekly review, weak areas, resource discovery, notes, learning memory, and more.
+- **Intent router** (`server/ai/agent.js`) — maps each message to an intent and composes
+  an answer from real tool results. It tracks **focus** so pronouns resolve: say
+  *"explain my next topic"*, then *"make it harder"* and *"give me another one"* without
+  repeating yourself.
+- **Conversation persistence** — chats are stored per-user (`conversations` +
+  `messages` tables) with a sidebar, history, and per-conversation isolation.
+- **Streaming** — `GET /api/chat/stream` streams replies as SSE tokens so the UI renders
+  progressively, with stop/retry and message states.
+- When a model key is set, open-ended intents (explain, resources, motivation) are
+  enriched by the LLM with the same real tool context; otherwise the engine answers.
+
+### Notification System (email + in-app)
+
+LearnMate generates **real notifications from real learning data** and delivers them
+through the channels you enable:
+
+- **In-app notifications** — always work. A notification bell in the header polls for
+  updates, groups by Today/Earlier, orders by priority, deep-links to the relevant
+  screen, and shows read/unread. A **Notification History** page (`/notifications`)
+  lets you filter by channel, status, read state and date.
+- **Email notifications** — delivered by a real transactional provider:
+  `EMAIL_PROVIDER=resend|sendgrid|smtp`. Credentials stay server-side; keys never reach
+  the browser. A built-in, dependency-free SMTP client supports `smtp`.
+- **Notification Settings** (`/notification-settings`) — per-type toggles for email and
+  in-app, notification email address + verification, quiet hours, and a **Send Test
+  Email** button that reports real delivery status.
+- **Generators** (`server/agent/generators.js`) — morning plan, weekly & monthly
+  reviews, task reminders, missed-task AI adaptation (complete / move / split / skip),
+  revision-due, assessment-ready, and goal-deadline (14/7/1-day) notifications — all
+  computed from the database, never fabricated.
+- **Reliability** (`server/agent/notify.js`) — a notification **queue + worker**
+  (`email_queue` drained by the scheduler), **idempotency keys** to prevent duplicates
+  across restarts, honest status tracking (`queued → sent/failed`; nothing is marked
+  delivered unless the provider accepted it), bounded retries (max 3, no spam), and
+  **quiet hours** (non-critical email is deferred to the next morning in the user's
+  timezone).
+- **Chat integration** — the AI Coach can set notifications: *"remind me to study Python
+  tomorrow morning"*, *"send me my learning plan by email every morning"*,
+  *"stop sending me task reminder emails"* — all write real preference changes.
+
+### Local development (safe email testing)
+
+```bash
+# Writes rendered emails to data/logs/email/ instead of sending anything real.
+NOTIFICATION_ENV=development EMAIL_PROVIDER=log npm run notifications:test
+
+# Trigger the morning agent manually (generates the plan + notifications).
+npm run agent:morning
+```
+
+`NOTIFICATION_ENV=production` (the default) requires a real provider. The **Send Test
+Email** button and `npm run notifications:test` both verify delivery end-to-end.
+
 ---
 
 ## Database Setup
@@ -163,10 +224,21 @@ There is also a **"Run morning agent now"** button on the *Agent Activity* scree
 npm test
 ```
 
-Uses Node's built-in test runner (no extra install). Covers authentication, database,
-goal + roadmap creation, daily plan generation, session tracking, adaptive task
-completion, assessment grading, mastery computation, empty-state (no mock data), and
-agent run history.
+Uses Node's built-in test runner (no extra install). Three suites:
+
+- `test/app.test.js` — core: authentication, database, goal + roadmap creation, daily
+  plan generation, session tracking, adaptive task completion, assessment grading,
+  mastery computation, empty-state (no mock data), and agent run history.
+- `test/chat.test.js` — AI Coach: greeting, plan generation, topic explanation,
+  easier/harder challenges, real task completion (DB write), conversation persistence,
+  weak-area detection, roadmap, quiz, weekly review, goal creation, profile, deletion,
+  cross-user isolation, and SSE streaming.
+- `test/notifications.test.js` — notification system: task creation, plan generation →
+  in-app notification, morning email generation + provider acceptance, read/unread,
+  deep links, task reminders, task-completion suppression, revision notifications, and
+  email-failure handling with the in-app copy intact.
+
+Total: **34 tests**.
 
 ---
 
@@ -233,10 +305,19 @@ React (Vite) frontend  ──HTTP──►  Express API  ──►  SQLite (node
   Accountability / Resource / Review agents.
 - **Agent memory** — `server/ai/memory.js` derives persistent memory (strengths,
   weaknesses, struggles, interests, projects) from real sessions and assessments.
-- **Scheduler** — `server/agent/scheduler.js` (in-process, catch-up safe) + a cron
-  endpoint `POST /api/agent/cron/morning` (ADMIN_TOKEN) for external schedulers.
-- **Notifications** — `server/agent/notify.js` (in-app always; webhook/Telegram/email
-  when configured), with an audit log in `agent_runs`.
+- **AI Coach (chat agent)** — `server/ai/tools.js` (20+ tool registry) +
+  `server/ai/agent.js` (multi-turn intent router with focus tracking), persistent
+  `conversations`/`messages`, and an SSE streaming endpoint.
+- **AI Provider** — `server/ai/provider.js` (OpenAI/Anthropic) enriches open-ended
+  coach answers with real model output when a key is configured.
+- **Scheduler** — `server/agent/scheduler.js` (in-process, catch-up safe) runs the
+  morning agent plus the notification checks (revision, deadlines, task reminders,
+  missed tasks, weekly/monthly reviews) and drains the email queue; a cron endpoint
+  `POST /api/agent/cron/morning` (ADMIN_TOKEN) supports external schedulers.
+- **Notification Engine** — `server/agent/notify.js` (queue + idempotency + quiet hours)
+  → `server/agent/email.js` (Resend / SendGrid / built-in SMTP / dev log) →
+  `server/agent/email-templates.js` (HTML templates) → `server/agent/generators.js`
+  (morning, weekly, monthly, task, revision, assessment, deadline, missed-task).
 
 ### Honesty guarantees
 

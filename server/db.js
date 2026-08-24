@@ -271,12 +271,75 @@ export function migrate() {
     body TEXT,
     channel TEXT DEFAULT 'in-app',
     status TEXT DEFAULT 'pending',
+    priority TEXT DEFAULT 'medium',
     error TEXT,
+    scheduled_for TEXT,
+    sent_at TEXT,
+    read INTEGER DEFAULT 0,
+    read_at TEXT,
+    related_entity_type TEXT,
+    related_entity_id INTEGER,
+    action_url TEXT,
+    idempotency_key TEXT,
+    metadata_json TEXT DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')),
-    delivered_at TEXT,
-    read INTEGER DEFAULT 0
+    delivered_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS notification_preferences (
+    user_id INTEGER PRIMARY KEY,
+    prefs_json TEXT DEFAULT '{}',
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS email_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    notification_id INTEGER,
+    to_email TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    html TEXT,
+    provider TEXT,
+    status TEXT DEFAULT 'queued',
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    sent_at TEXT,
+    FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS email_verifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    email TEXT NOT NULL,
+    code TEXT NOT NULL,
+    used INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT 'New chat',
+    focus_json TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool TEXT,
+    data_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
   );
   `)
+
+  ensureColumn('conversations', 'focus_json', "TEXT DEFAULT '{}'")
 
   ensureColumn('users', 'timezone', "TEXT DEFAULT 'UTC'")
   ensureColumn('users', 'password_salt', 'TEXT')
@@ -291,6 +354,27 @@ export function migrate() {
   ensureColumn('resources', 'discovered_at', 'TEXT')
   ensureColumn('resources', 'last_verified', 'TEXT')
   ensureColumn('resources', 'verified', 'INTEGER DEFAULT 0')
+
+  // notification system
+  ensureColumn('users', 'notification_email', 'TEXT')
+  ensureColumn('users', 'email_notifications_enabled', 'INTEGER DEFAULT 0')
+  ensureColumn('users', 'email_verified', 'INTEGER DEFAULT 0')
+  ensureColumn('users', 'morning_notification_time', 'TEXT')
+  ensureColumn('users', 'quiet_hours_enabled', 'INTEGER DEFAULT 0')
+  ensureColumn('users', 'quiet_hours_start', "TEXT DEFAULT '22:00'")
+  ensureColumn('users', 'quiet_hours_end', "TEXT DEFAULT '07:00'")
+  ensureColumn('notifications', 'priority', "TEXT DEFAULT 'medium'")
+  ensureColumn('notifications', 'scheduled_for', 'TEXT')
+  ensureColumn('notifications', 'sent_at', 'TEXT')
+  ensureColumn('notifications', 'read_at', 'TEXT')
+  ensureColumn('notifications', 'related_entity_type', 'TEXT')
+  ensureColumn('notifications', 'related_entity_id', 'INTEGER')
+  ensureColumn('notifications', 'action_url', 'TEXT')
+  ensureColumn('notifications', 'idempotency_key', 'TEXT')
+  ensureColumn('notifications', 'metadata_json', "TEXT DEFAULT '{}'")
+  try {
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_idempotency ON notifications (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL')
+  } catch { /* ignore */ }
 }
 
 // Idempotent column addition for upgrading existing databases.

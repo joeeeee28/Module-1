@@ -76,6 +76,15 @@ export const api = {
   generateReview: (period) => api.post('/api/reviews/generate', { period }),
 
   coach: (message) => api.post('/api/coach', { message }),
+
+  // chat agent
+  chatConversations: () => api.get('/api/chat/conversations'),
+  createChatConversation: (title) => api.post('/api/chat/conversations', { title }),
+  chatConversation: (id) => api.get(`/api/chat/conversations/${id}`),
+  deleteChatConversation: (id) => api.del(`/api/chat/conversations/${id}`),
+  chat: (conversationId, message) => api.post('/api/chat', { conversationId, message }),
+  chatStreamUrl: (conversationId, message) =>
+    `/api/chat/stream?conversationId=${encodeURIComponent(conversationId || '')}&message=${encodeURIComponent(message)}`,
   briefing: () => api.get('/api/briefing'),
   calendar: (month) => api.get(`/api/calendar?month=${month}`),
   dashboard: () => api.get('/api/dashboard'),
@@ -88,10 +97,33 @@ export const api = {
   endSession: (id, b) => api.post(`/api/sessions/${id}/end`, b),
 
   // notifications
-  notifications: () => api.get('/api/notifications'),
+  notifications: (f = {}) => {
+    const p = new URLSearchParams()
+    if (f.limit) p.set('limit', f.limit)
+    if (f.channel) p.set('channel', f.channel)
+    if (f.status) p.set('status', f.status)
+    if (f.read) p.set('read', f.read)
+    const qs = p.toString()
+    return api.get(`/api/notifications${qs ? '?' + qs : ''}`)
+  },
+  notificationsHistory: (q = {}) => {
+    const p = new URLSearchParams()
+    if (q.channel) p.set('channel', q.channel)
+    if (q.status) p.set('status', q.status)
+    if (q.read) p.set('read', q.read)
+    if (q.date) p.set('date', q.date)
+    const qs = p.toString()
+    return api.get(`/api/notifications/history${qs ? '?' + qs : ''}`)
+  },
   unreadCount: () => api.get('/api/notifications/unread'),
   readNotification: (id) => api.post(`/api/notifications/${id}/read`),
   readAllNotifications: () => api.post('/api/notifications/read-all'),
+  notificationPrefs: () => api.get('/api/notifications/preferences'),
+  saveNotificationPrefs: (b) => api.put('/api/notifications/preferences', b),
+  sendVerificationEmail: (email) => api.post('/api/notifications/email/send-verification', { email }),
+  verifyEmail: (code) => api.post('/api/notifications/email/verify', { code }),
+  testNotification: () => api.post('/api/notifications/test'),
+  generateNotification: (type) => api.post('/api/notifications/generate', { type }),
 
   // agent
   agentActivity: () => api.get('/api/agent/activity'),

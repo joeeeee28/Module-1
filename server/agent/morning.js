@@ -11,7 +11,7 @@ import { logger } from '../config.js'
 import { generateDailyPlan, computePriorityScores, goalWeakArea } from '../ai/engine.js'
 import { memorySummary, deriveMemory } from '../ai/memory.js'
 import { discoverResources, getCurrentInfo } from '../ai/discovery.js'
-import { sendNotification } from './notify.js'
+import { notifyMorningPlan } from './generators.js'
 import { logAgentRun } from './runlog.js'
 
 export async function runMorningAgent(userId, { notify = true } = {}) {
@@ -77,14 +77,10 @@ export async function runMorningAgent(userId, { notify = true } = {}) {
   db.prepare('UPDATE daily_plans SET briefing_json = ? WHERE id = ?').run(JSON.stringify(enriched), plan.id)
   logAgentRun(userId, 'Daily Agent', 'Briefing enriched', `resource=${resource ? 'yes' : 'no'} live=${currentInfo ? 'yes' : 'no'}`)
 
-  // 4. send the morning notification (real delivery, per channel)
+  // 4. send the morning notification (in-app + email when enabled)
   if (notify) {
     try {
-      const results = await sendNotification(user, {
-        type: 'morning_briefing',
-        title: `☀️ Today's mission: ${briefing.topic}`,
-        body: `${briefing.estimatedMinutes} min · ${(briefing.plan || []).map((b) => b.label).join(' → ')}`,
-      })
+      const results = await notifyMorningPlan(user, enriched, plan)
       const ok = results.every((r) => r.status === 'delivered')
       logAgentRun(userId, 'Notification Agent', 'Morning notification', results.map((r) => `${r.channel}:${r.status}`).join(', '), ok ? 'SUCCESS' : 'PARTIAL')
     } catch (e) {

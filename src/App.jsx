@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react'
-import { Routes, Route, Navigate, NavLink, useLocation, Link } from 'react-router-dom'
+import { Routes, Route, Navigate, NavLink, useLocation, Link, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Sun, Target, Route as RouteIcon, Layers, Calendar, Link2,
   StickyNote, GraduationCap, TrendingUp, Sparkles, ClipboardList, Settings,
@@ -20,6 +20,8 @@ import Coach from './pages/Coach.jsx'
 import Review from './pages/Review.jsx'
 import SettingsPage from './pages/Settings.jsx'
 import AgentActivity from './pages/AgentActivity.jsx'
+import Notifications from './pages/Notifications.jsx'
+import NotificationSettings from './pages/NotificationSettings.jsx'
 
 const AuthContext = createContext(null)
 export const useAuth = () => useContext(AuthContext)
@@ -45,9 +47,11 @@ const NAV = [
     { to: '/coach', icon: <Sparkles />, label: 'AI Coach' },
     { to: '/review', icon: <ClipboardList />, label: 'Weekly Review' },
     { to: '/activity', icon: <Activity />, label: 'Agent Activity' },
+    { to: '/notifications', icon: <Bell />, label: 'Notifications' },
   ]},
   { group: '', items: [
     { to: '/settings', icon: <Settings />, label: 'Settings' },
+    { to: '/notification-settings', icon: <Bell />, label: 'Notification Settings' },
   ]},
 ]
 
@@ -161,6 +165,8 @@ function Layout() {
             <Route path="/coach" element={<Coach />} />
             <Route path="/review" element={<Review />} />
             <Route path="/activity" element={<AgentActivity />} />
+            <Route path="/notifications" element={<Notifications />} />
+            <Route path="/notification-settings" element={<NotificationSettings />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -263,52 +269,80 @@ function Gate() {
   return <Layout />
 }
 
+const PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 }
+
+function isToday(s) {
+  if (!s) return false
+  return String(s).slice(0, 10) === new Date().toISOString().slice(0, 10)
+}
+
 function NotificationsBell() {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState([])
   const [count, setCount] = useState(0)
+  const navigate = useNavigate()
 
   const load = async () => {
     try {
-      const n = await api.notifications()
-      setItems(n)
+      const n = await api.notifications({ limit: 100 })
+      const sorted = [...n].sort((a, b) => (PRIORITY_ORDER[a.priority] ?? 9) - (PRIORITY_ORDER[b.priority] ?? 9) || (b.id - a.id))
+      setItems(sorted)
       setCount(n.filter((x) => !x.read).length)
     } catch { /* ignore */ }
   }
-  useEffect(() => { load() }, [])
+
   useEffect(() => {
-    if (open) {
-      api.readAllNotifications().then(load)
+    load()
+    const t = setInterval(load, 30000) // real-time in-app updates via polling
+    return () => clearInterval(t)
+  }, [])
+
+  const openNotification = async (n) => {
+    if (!n.read) { api.readNotification(n.id).then(load) }
+    setOpen(false)
+    if (n.action_url) {
+      const path = n.action_url.replace(/^https?:\/\/[^/]+/, '')
+      navigate(path)
     }
-  }, [open])
+  }
+
+  const todayItems = items.filter((x) => isToday(x.created_at))
+  const earlierItems = items.filter((x) => !isToday(x.created_at))
 
   return (
     <div style={{ position: 'relative' }}>
-      <button className="btn icon ghost" onClick={() => setOpen(!open)}>
+      <button className="btn icon ghost" onClick={() => setOpen(!open)} aria-label="Notifications">
         <Bell size={19} />
         {count > 0 && (
           <span style={{ position: 'absolute', top: -2, right: -2, background: 'var(--red)', color: '#fff', fontSize: 10, fontWeight: 700, borderRadius: 99, padding: '1px 5px' }}>{count}</span>
         )}
       </button>
       {open && (
-        <div className="card" style={{ position: 'absolute', right: 0, top: 42, width: 340, maxHeight: 420, overflowY: 'auto', zIndex: 200, boxShadow: 'var(--shadow)' }}>
-          <div className="flex-between mb" style={{ marginBottom: 10 }}>
+        <div className="card" style={{ position: 'absolute', right: 0, top: 42, width: 360, maxHeight: 460, overflowY: 'auto', zIndex: 200, boxShadow: 'var(--shadow)' }}>
+          <div className="flex-between" style={{ paddingBottom: 8, borderBottom: '1px solid var(--border)', marginBottom: 6 }}>
             <b className="small">Notifications</b>
-            <button className="btn ghost sm" onClick={() => api.readAllNotifications().then(load)}>Mark all read</button>
+            <Link to="/notifications" onClick={() => setOpen(false)} className="small" style={{ color: 'var(--accent-3)' }}>View history →</Link>
           </div>
-          {items.length === 0 && <div className="muted small">No notifications yet.</div>}
-          {items.map((n) => (
-            <div key={n.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-              <div className="flex-between">
-                <span className="small" style={{ fontWeight: n.read ? 500 : 700 }}>{n.title}</span>
-                <span className={`badge ${n.status === 'delivered' ? 'green' : n.status === 'failed' ? 'red' : 'gray'}`}>{n.channel}</span>
-              </div>
-              {n.body && <div className="small faint">{n.body}</div>}
-              <div className="small faint" style={{ fontSize: 11 }}>{n.created_at} · {n.status}</div>
-            </div>
-          ))}
+          {items.length === 0 && <div className="muted small" style={{ padding: 12 }}>No notifications yet.</div>}
+          {todayItems.length > 0 && <div className="notif-group">Today</div>}
+          {todayItems.map((n) => <NotifItem key={n.id} n={n} onClick={() => openNotification(n)} />)}
+          {earlierItems.length > 0 && <div className="notif-group">Earlier</div>}
+          {earlierItems.map((n) => <NotifItem key={n.id} n={n} onClick={() => openNotification(n)} />)}
         </div>
       )}
+    </div>
+  )
+}
+
+function NotifItem({ n, onClick }) {
+  return (
+    <div className={`notif-item ${n.read ? '' : 'unread'}`} onClick={onClick}>
+      <div className="flex-between" style={{ gap: 8 }}>
+        <span className="small" style={{ fontWeight: n.read ? 500 : 700, color: n.read ? 'var(--text-muted)' : 'var(--text)' }}>{n.title}</span>
+        <span className="badge gray">{n.channel}</span>
+      </div>
+      {n.body && <div className="small faint">{n.body}</div>}
+      <div className="small faint" style={{ fontSize: 11, marginTop: 2 }}>{n.created_at?.replace('T', ' ').slice(0, 16)}</div>
     </div>
   )
 }

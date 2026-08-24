@@ -30,7 +30,7 @@ function loadEnvFile() {
 }
 loadEnvFile()
 
-export const VERSION = '2.1.0'
+export const VERSION = '2.2.0'
 
 export const config = {
   port: process.env.PORT || 4000,
@@ -69,6 +69,20 @@ export const config = {
   smtpUser: process.env.SMTP_USER || '',
   smtpPass: process.env.SMTP_PASS || '',
   smtpFrom: process.env.SMTP_FROM || '',
+  smtpSecure: process.env.SMTP_SECURE === 'true',
+
+  // transactional email provider (real delivery)
+  //   EMAIL_PROVIDER = resend | sendgrid | smtp | log
+  //   'log' is a development-only provider that writes rendered emails to
+  //   data/logs/email/ instead of sending (safe for local testing).
+  notificationEnv: process.env.NOTIFICATION_ENV || 'production',
+  appUrl: (process.env.APP_URL || `http://localhost:${process.env.PORT || 4000}`).replace(/\/$/, ''),
+  emailProvider: (process.env.EMAIL_PROVIDER || '').toLowerCase(),
+  emailApiKey: process.env.EMAIL_API_KEY || '',
+  emailFrom: process.env.EMAIL_FROM || process.env.SMTP_FROM || '',
+  emailFromName: process.env.EMAIL_FROM_NAME || 'LearnMate',
+  resendBaseUrl: process.env.RESEND_BASE_URL || 'https://api.resend.com',
+  sendgridBaseUrl: process.env.SENDGRID_BASE_URL || 'https://api.sendgrid.com',
 
   // cron-trigger token: protects /api/agent/* endpoints called by an external scheduler
   adminToken: process.env.ADMIN_TOKEN || '',
@@ -81,6 +95,16 @@ export const aiConfigured = () =>
 
 export const searchConfigured = () =>
   Boolean(config.searchProvider && config.searchApiKey)
+
+export const emailConfigured = () => {
+  const p = config.emailProvider
+  if (p === 'resend' || p === 'sendgrid') return Boolean(config.emailApiKey && config.emailFrom)
+  if (p === 'smtp') return Boolean(config.smtpHost && config.emailFrom)
+  if (p === 'log') return config.notificationEnv === 'development'
+  return false
+}
+
+export const isDevMode = () => config.notificationEnv === 'development'
 
 // ---------------------------------------------------------------------------
 // Structured logger — writes human-readable logs to disk + console.
