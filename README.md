@@ -92,6 +92,25 @@ from your stored data. Setting `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) upgrade
 AI Coach and open-ended answers to a real LLM with your full learning context. Without
 a key, nothing is faked — the UI labels every response with its source (`engine` vs `model`).
 
+### AI Coach (chat agent)
+
+The **AI Coach** (`/coach`) is a multi-turn chat agent:
+
+- **Tool-calling layer** (`server/ai/tools.js`) — 20+ server-side tools that read and
+  mutate your real data: profile, goals, roadmap, skill mastery, sessions, pending &
+  revision tasks, plan generation, task completion/rescheduling, goal creation, quizzes,
+  weekly review, weak areas, resource discovery, notes, learning memory, and more.
+- **Intent router** (`server/ai/agent.js`) — maps each message to an intent and composes
+  an answer from real tool results. It tracks **focus** so pronouns resolve: say
+  *"explain my next topic"*, then *"make it harder"* and *"give me another one"* without
+  repeating yourself.
+- **Conversation persistence** — chats are stored per-user (`conversations` +
+  `messages` tables) with a sidebar, history, and per-conversation isolation.
+- **Streaming** — `GET /api/chat/stream` streams replies as SSE tokens so the UI renders
+  progressively, with stop/retry and message states.
+- When a model key is set, open-ended intents (explain, resources, motivation) are
+  enriched by the LLM with the same real tool context; otherwise the engine answers.
+
 ---
 
 ## Database Setup
@@ -163,10 +182,17 @@ There is also a **"Run morning agent now"** button on the *Agent Activity* scree
 npm test
 ```
 
-Uses Node's built-in test runner (no extra install). Covers authentication, database,
-goal + roadmap creation, daily plan generation, session tracking, adaptive task
-completion, assessment grading, mastery computation, empty-state (no mock data), and
-agent run history.
+Uses Node's built-in test runner (no extra install). Two suites:
+
+- `test/app.test.js` — core: authentication, database, goal + roadmap creation, daily
+  plan generation, session tracking, adaptive task completion, assessment grading,
+  mastery computation, empty-state (no mock data), and agent run history.
+- `test/chat.test.js` — AI Coach: greeting, plan generation, topic explanation,
+  easier/harder challenges, real task completion (DB write), conversation persistence,
+  weak-area detection, roadmap, quiz, weekly review, goal creation, profile, deletion,
+  cross-user isolation, and SSE streaming.
+
+Total: **25 tests**.
 
 ---
 
@@ -233,6 +259,11 @@ React (Vite) frontend  ──HTTP──►  Express API  ──►  SQLite (node
   Accountability / Resource / Review agents.
 - **Agent memory** — `server/ai/memory.js` derives persistent memory (strengths,
   weaknesses, struggles, interests, projects) from real sessions and assessments.
+- **AI Coach (chat agent)** — `server/ai/tools.js` (20+ tool registry) +
+  `server/ai/agent.js` (multi-turn intent router with focus tracking), persistent
+  `conversations`/`messages`, and an SSE streaming endpoint.
+- **AI Provider** — `server/ai/provider.js` (OpenAI/Anthropic) enriches open-ended
+  coach answers with real model output when a key is configured.
 - **Scheduler** — `server/agent/scheduler.js` (in-process, catch-up safe) + a cron
   endpoint `POST /api/agent/cron/morning` (ADMIN_TOKEN) for external schedulers.
 - **Notifications** — `server/agent/notify.js` (in-app always; webhook/Telegram/email

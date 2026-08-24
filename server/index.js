@@ -23,6 +23,7 @@ import {
   ensureSkillForGoal,
 } from './ai/engine.js'
 import { aiComplete } from './ai/provider.js'
+import { handleMessage } from './ai/agent.js'
 import { discoverResources, getCurrentInfo } from './ai/discovery.js'
 import { recordMemory, getMemory, deriveMemory, memorySummary } from './ai/memory.js'
 import { runMorningAgent } from './agent/morning.js'
@@ -588,6 +589,137 @@ function coachContextFor(uid) {
   const mem = memorySummary(uid)
   return JSON.stringify({ goals, skills, recentSessions: recent, assessments, memory: mem }, null, 2)
 }
+
+// ---------------- chat agent (multi-turn) ----------------
+function getConversationForUser(id, uid) {
+  return db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(id, uid)
+}
+
+function addMessage(conversationId, userId, role, content, tool = null, data = null) {
+  const ins = db
+    .prepare('INSERT INTO messages (conversation_id, user_id, role, content, tool, data_json) VALUES (?,?,?,?,?,?)')
+    .run(conversationId, userId, role, content, tool, data ? JSON.stringify(data) : null)
+  return db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(ins.lastInsertRowid))
+}
+
+function conversationMessages(conversationId) {
+  return db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id').all(conversationId)
+}
+
+// Shared pipeline: persist the user message, run the agent, persist the reply.
+async function processChat(uid, conversationId, message) {
+  if (!message || !message.trim()) throw new Error('Message required')
+  let conversation = conversationId ? getConversationForUser(conversationId, uid) : null
+  const isNew = !conversation
+  if (!conversation) {
+    const ins = db
+      .prepare('INSERT INTO conversations (user_id, title) VALUES (?,?)')
+      .run(uid, message.trim().slice(0, 48) || 'New chat')
+    conversation = db.prepare('SELECT * FROM conversations WHERE id = ?').get(Number(ins.lastInsertRowid))
+  }
+
+  addMessage(conversation.id, uid, 'user', message)
+  const result = await handleMessage(message, uid, { conversation })
+
+  // persist focus + metadata
+  db.prepare('UPDATE conversations SET focus_json = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    .run(JSON.stringify(result.focus || {}), conversation.id)
+  if (isNew) {
+    db.prepare("UPDATE conversations SET title = ? WHERE id = ?").run(message.trim().slice(0, 48), conversation.id)
+  }
+
+  const replyMsg = addMessage(conversation.id, uid, 'assistant', result.content, result.tool, result.data)
+  const updated = db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversation.id)
+  return { conversation: updated, reply: replyMsg, intent: result.intent, tool: result.tool, data: result.data, source: result.source }
+}
+
+app.get('/api/chat/conversations', (req, res) => {
+  const uid = currentUser(req)?.id
+  const rows = db.prepare('SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC').all(uid)
+  res.json(rows.map((c) => ({ ...c, message_count: db.prepare('SELECT COUNT(*) c FROM messages WHERE conversation_id = ?').get(c.id).c })))
+})
+
+app.post('/api/chat/conversations', (req, res) => {
+  const uid = currentUser(req)?.id
+  const title = (req.body?.title || 'New chat').toString().slice(0, 80)
+  const ins = db.prepare('INSERT INTO conversations (user_id, title) VALUES (?,?)').run(uid, title)
+  res.json(db.prepare('SELECT * FROM conversations WHERE id = ?').get(Number(ins.lastInsertRowid)))
+})
+
+app.get('/api/chat/conversations/:id', (req, res) => {
+  const uid = currentUser(req)?.id
+  const c = getConversationForUser(req.params.id, uid)
+  if (!c) return res.status(404).json({ error: 'Conversation not found' })
+  res.json({ conversation: c, messages: conversationMessages(c.id) })
+})
+
+app.delete('/api/chat/conversations/:id', (req, res) => {
+  const uid = currentUser(req)?.id
+  const c = getConversationForUser(req.params.id, uid)
+  if (!c) return res.status(404).json({ error: 'Conversation not found' })
+  db.prepare('DELETE FROM messages WHERE conversation_id = ? AND user_id = ?').run(c.id, uid)
+  db.prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?').run(c.id, uid)
+  res.json({ ok: true })
+})
+
+// Synchronous chat turn.
+app.post('/api/chat', async (req, res) => {
+  const uid = currentUser(req)?.id
+  const { conversationId, message } = req.body || {}
+  try {
+    const result = await processChat(uid, conversationId, message)
+    res.json(result)
+  } catch (e) {
+    logger.error('chat', 'chat turn failed', { error: e.message })
+    res.status(400).json({ error: e.message })
+  }
+})
+
+// Streaming chat turn (SSE). Each reply is streamed as progressive tokens so
+// the UI can render incrementally; a final metadata event carries the saved
+// conversation + messages so the UI can reconcile its state.
+app.get('/api/chat/stream', async (req, res) => {
+  const uid = currentUser(req)?.id
+  const conversationId = req.query.conversationId ? Number(req.query.conversationId) : null
+  const message = req.query.message || ''
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders()
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
+  let aborted = false
+  res.on('close', () => {
+    aborted = true
+  })
+
+  try {
+    const { conversation, reply, intent, source } = await processChat(uid, conversationId, message)
+    if (aborted) return res.end()
+    const content = reply.content || ''
+    const step = 3
+    for (let i = 0; i < content.length; i += step) {
+      if (aborted) return res.end()
+      send({ delta: content.slice(i, i + step) })
+      await new Promise((r) => setTimeout(r, 12))
+    }
+    send({ done: true, intent, source })
+    send({
+      meta: {
+        conversation,
+        messages: conversationMessages(conversation.id),
+        userMessage: conversationMessages(conversation.id).slice(-2)[0],
+        reply,
+      },
+    })
+    res.end()
+  } catch (e) {
+    logger.error('chat', 'stream failed', { error: e.message })
+    send({ error: e.message })
+    res.end()
+  }
+})
 
 // ---------------- briefing ----------------
 app.get('/api/briefing', (req, res) => {

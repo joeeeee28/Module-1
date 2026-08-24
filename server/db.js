@@ -276,7 +276,30 @@ export function migrate() {
     delivered_at TEXT,
     read INTEGER DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT DEFAULT 'New chat',
+    focus_json TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool TEXT,
+    data_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+  );
   `)
+
+  ensureColumn('conversations', 'focus_json', "TEXT DEFAULT '{}'")
 
   ensureColumn('users', 'timezone', "TEXT DEFAULT 'UTC'")
   ensureColumn('users', 'password_salt', 'TEXT')

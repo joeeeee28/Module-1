@@ -76,6 +76,15 @@ export const api = {
   generateReview: (period) => api.post('/api/reviews/generate', { period }),
 
   coach: (message) => api.post('/api/coach', { message }),
+
+  // chat agent
+  chatConversations: () => api.get('/api/chat/conversations'),
+  createChatConversation: (title) => api.post('/api/chat/conversations', { title }),
+  chatConversation: (id) => api.get(`/api/chat/conversations/${id}`),
+  deleteChatConversation: (id) => api.del(`/api/chat/conversations/${id}`),
+  chat: (conversationId, message) => api.post('/api/chat', { conversationId, message }),
+  chatStreamUrl: (conversationId, message) =>
+    `/api/chat/stream?conversationId=${encodeURIComponent(conversationId || '')}&message=${encodeURIComponent(message)}`,
   briefing: () => api.get('/api/briefing'),
   calendar: (month) => api.get(`/api/calendar?month=${month}`),
   dashboard: () => api.get('/api/dashboard'),
